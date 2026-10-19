@@ -40,7 +40,7 @@ void GsDraw_FullscreenToggle(void); /* F11: switch, save it, write the settings 
 #define PORT_PAD_BUTTONS 16
 #define PORT_PAD_LT 100 /* controller sources besides SDL_GamepadButton values: the triggers */
 #define PORT_PAD_RT 101
-const char *PortInput_ActionLabel(int action);
+const char *PortInput_ActionLabel(int player, int action);
 int *PortInput_Keys(int player);       /* [PORT_ACTIONS] SDL scancodes, 0 = none */
 int *PortInput_PadButtons(int player); /* [PORT_PAD_BUTTONS] controller source, -1 = none */
 int *PortInput_PadSlot(int player);    /* which connected controller: -1 none, 0 = first, ... */

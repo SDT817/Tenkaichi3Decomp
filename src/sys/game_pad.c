@@ -97,9 +97,9 @@ void Pad_UpdateGameButtons(s32 pad) {
 
         btn &= ~(PADG_CROSS | PADG_SQUARE | PADG_CIRCLE | PADG_TRIANGLE);
         if (face & PADG_SQUARE) { btn |= PADG_CROSS; }
-        if (face & PADG_CROSS) { btn |= PADG_SQUARE; }
-        if (face & PADG_CIRCLE) { btn |= PADG_TRIANGLE; }
-        if (face & PADG_TRIANGLE) { btn |= PADG_CIRCLE; }
+        if (face & PADG_CROSS) { btn |= PADG_TRIANGLE; }
+        if (face & PADG_CIRCLE) { btn |= PADG_CIRCLE; }
+        if (face & PADG_TRIANGLE) { btn |= PADG_SQUARE; }
     }
 #endif
     p->gamePressed = btn & ~p->gameHeld;
