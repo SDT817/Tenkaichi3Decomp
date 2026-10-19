@@ -10,7 +10,7 @@
  *   player 2   second controller, no keys
  *   controller the usual layout (south = cross, east = circle, west = square, north = triangle, triggers = L2 / R2)
  * The sticks of a controller are passed through, or given a round deadzone first (stick_bytes, below). The pressure
- * bytes of the buffer are left at zero. The game's motor commands go to the player's controller (Port_PadVibrate).
+ * bytes are zero except for the control layout in the last byte. Motor commands go to the player's controller.
  */
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -20,6 +20,7 @@
 #include <string.h>
 #include "gs_internal.h"
 #include "ui.h"
+#include "../../include/port_control_mode.h"
 
 int gPortOverlayOpen, gPortInputCapture, gPortChatTyping;
 extern int Port_Setting(const char *name, int def); /* plat_settings.c */
@@ -55,6 +56,7 @@ static const struct { const char *name, *label; unsigned bit; int key; int pad; 
 };
 
 static int sKeys[2][PORT_ACTIONS], sPadBtn[2][PORT_PAD_BUTTONS], sPadSlot[2];
+static int sControlMode[2]; /* 0 PS2, 1 Wii */
 /* Per player: the deadzone of the left and of the right stick (-1 = the game's own, as the pad's bytes always were
    passed; 0..PORT_DEADZONE_MAX = a round one of that many percent, stick_bytes below), and vibration (on, strength
    in percent). */
@@ -78,6 +80,7 @@ static void defaults(int player) {
         }
     }
     sPadSlot[player] = player;
+    sControlMode[player] = 0;
     if (player == 1 && getenv("BT3_PAD_SHARED") != NULL) {
         sPadSlot[player] = 0; /* BT3_PAD_SHARED: both players on controller 1 (testing 1P vs 2P with one pad) */
     }
@@ -103,6 +106,8 @@ static void load(void) {
         }
         snprintf(name, sizeof(name), "padslot_p%d", p + 1);
         sPadSlot[p] = Port_Setting(name, sPadSlot[p]);
+        snprintf(name, sizeof(name), "control_mode_p%d", p + 1);
+        sControlMode[p] = Port_Setting(name, 0) == 1;
         if (p == 1 && getenv("BT3_PAD_SHARED") != NULL) {
             sPadSlot[p] = 0; /* overrides the saved setting too */
         }
@@ -124,6 +129,7 @@ const char *PortInput_ActionLabel(int action) { return kActions[action].label; }
 int *PortInput_Keys(int player) { pthread_once(&sLoadOnce, load); return sKeys[player]; }
 int *PortInput_PadButtons(int player) { pthread_once(&sLoadOnce, load); return sPadBtn[player]; }
 int *PortInput_PadSlot(int player) { pthread_once(&sLoadOnce, load); return &sPadSlot[player]; }
+int *PortInput_ControlMode(int player) { pthread_once(&sLoadOnce, load); return &sControlMode[player]; }
 int *PortInput_Deadzone(int player) { pthread_once(&sLoadOnce, load); return sDeadzone[player]; }
 int *PortInput_Vibration(int player) { pthread_once(&sLoadOnce, load); return sVib[player]; }
 int *PortInput_OverlayKey(void) { pthread_once(&sLoadOnce, load); return &sOverlayKey; }
@@ -338,6 +344,8 @@ void PortInput_Save(void) {
         }
         snprintf(name, sizeof(name), "padslot_p%d", p + 1);
         Port_SettingSave(name, sPadSlot[p]);
+        snprintf(name, sizeof(name), "control_mode_p%d", p + 1);
+        Port_SettingSave(name, sControlMode[p]);
         for (a = 0; a < 2; a++) {
             snprintf(name, sizeof(name), "deadzone_p%d_%s", p + 1, a == 0 ? "ls" : "rs");
             Port_SettingSave(name, sDeadzone[p][a]);
@@ -465,6 +473,23 @@ static SDL_Gamepad *pad_of(int player) {
         }
     }
     return NULL;
+}
+
+/* The settings window reads the controller directly; binding capture keeps the physical buttons. */
+int PortInput_UiButton(SDL_Gamepad *gamepad, int button) {
+    int p;
+
+    pthread_once(&sLoadOnce, load);
+    for (p = 0; gamepad != NULL && p < 2; p++) {
+        if (sPadSlot[p] >= 0 && sPadSlot[p] < sIdCount && sIds[sPadSlot[p]] == SDL_GetGamepadID(gamepad)) {
+            if (sControlMode[p]) {
+                if (button == SDL_GAMEPAD_BUTTON_SOUTH) { return SDL_GAMEPAD_BUTTON_WEST; }
+                if (button == SDL_GAMEPAD_BUTTON_WEST) { return SDL_GAMEPAD_BUTTON_SOUTH; }
+            }
+            break;
+        }
+    }
+    return button;
 }
 
 /* BT3_PAD="frame:button,frame:button,...": scripted presses for player 1, each held for 4 frames from that frame
@@ -977,5 +1002,6 @@ int Port_PadRead(int socket, unsigned char *data) {
     data[0] = (unsigned char)(~btn & 0xFF);       /* active low */
     data[1] = (unsigned char)(~(btn >> 8) & 0xFF);
     data[2] = rx; data[3] = ry; data[4] = lx; data[5] = ly;
+    data[PORT_CONTROL_MODE_BYTE] = sControlMode[socket] ? PORT_CONTROL_MODE_WII : 0;
     return 18;
 }

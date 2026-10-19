@@ -1121,7 +1121,7 @@ int Ui_Event(const SDL_Event *ev) {
                 PortQuit_Action(PORT_QUIT_MOVE);
             }
         } else if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-            SDL_GamepadButton button = (SDL_GamepadButton)ev->gbutton.button;
+            SDL_GamepadButton button = (SDL_GamepadButton)PortInput_UiButton(SDL_GetGamepadFromID(ev->gbutton.which), ev->gbutton.button);
             if (button == SDL_GAMEPAD_BUTTON_SOUTH) { PortQuit_Action(PORT_QUIT_CONFIRM); }
             else if (button == SDL_GAMEPAD_BUTTON_EAST) { PortQuit_Action(PORT_QUIT_CANCEL); }
             else if (button == SDL_GAMEPAD_BUTTON_DPAD_LEFT || button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ||
@@ -1735,6 +1735,15 @@ static void controls_tab(void) {
     ImGui::RadioButton("Player 1", &player, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Player 2", &player, 1);
+    ImGui::SameLine(0.0f, 24.0f);
+    int *mode = PortInput_ControlMode(player);
+    if (ImGui::Button(*mode ? "Control mode: Wii" : "Control mode: PS2")) {
+        *mode = !*mode;
+        PortInput_Save();
+    }
+    ImGui::SetItemTooltip("Wii: right stick up = tag, down = transform, left/right = teammate and camera.\n"
+                          "RB/LB = rise/descend; RT/LT = fast rise/descend; hold right stick click = charge ki.\n"
+                          "Double-tap right stick left or right = Explosive Wave. Menus: X confirms, B goes back.");
     int *slot = PortInput_PadSlot(player), *keys = PortInput_Keys(player), *pads = PortInput_PadButtons(player);
     SDL_JoystickID *ids = SDL_GetGamepads(&count);
     if (*slot < 0) {
