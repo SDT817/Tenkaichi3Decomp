@@ -90,7 +90,7 @@ void Pad_UpdateGameButtons(s32 pad) {
 
 #ifdef PORT
     /* Swap menu actions only, including pause and results; battle buttons stay physical. */
-    if (p->data[PORT_CONTROL_MODE_BYTE] == PORT_CONTROL_MODE_WII &&
+    if (PORT_CONTROL_IS_WII(p->data) &&
         (!Battle_GetWork()->running || (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) ||
          (gBtlSeq != NULL && gBtlSeq->state == BTL_SEQ_END))) {
         u32 face = btn & (PADG_CROSS | PADG_SQUARE | PADG_CIRCLE | PADG_TRIANGLE);
