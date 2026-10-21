@@ -111,6 +111,10 @@ int gsTargetCount;
 int gsTexCount;
 unsigned gsFxOff;
 int gsGlowPercent = GLOW_DEFAULT;
+int gsGlarePercent = GLOW_DEFAULT;
+int gsSharpBlur = 1; /* the setting "Sharp stage blur" (sharp_blur): see draw_state */
+static int sGlowIsGlare; /* the glow chain under way is the sky's glare (gfxm_a.c GfxPost_DrawGlow: see below) */
+static int sBlockSample; /* the draw being set up reads a work buffer at the GS's 1x (orig.x): pipeline_get, key bit 25 */
 static int sTexPackOn = 1; /* the setting: use the texture pack (if one was found) */
 int gsAnchor;
 /* A fight's HUD in a picture wider than 4:3 (setting hud_layout, BT3_HUD=<n> for a test):
@@ -642,7 +646,8 @@ static uint32_t blend_key(uint64_t alpha, int abe) {
    one pipeline per key, so this is pure GS state -> an index):
    bits 0..9 blend, 10..11 depth test, 12 depth write, 13..14 topology, 16..19 colour write mask,
    20..21 vertices: 0 GS vertices, 1 program 0, 2 program 4, 3 program 6, 22 full-screen table pass,
-   23 the fragment shader without its own depth output, 24 flat-shadow stencil mask. */
+   23 the fragment shader without its own depth output, 24 flat-shadow stencil mask, 25 that shader with the GS's
+   1x sampling of a work buffer (gswb.frag). */
 static int pipeline_get(int ctx, int topo, int vu, int shadow) {
     uint64_t test = gGs.test[ctx], zb = gGs.zbuf[ctx];
     int zte = (test >> 16) & 1, ztst = (test >> 17) & 3, zwrite = !((zb >> 32) & 1);
@@ -670,6 +675,11 @@ static int pipeline_get(int ctx, int topo, int vu, int shadow) {
         if (nz < 0) { nz = getenv("BT3_NZ") != NULL ? atoi(getenv("BT3_NZ")) : 1; }
         if (nz && !zwrite && ztst != 3 && vu != 4) {
             key |= 1u << 23;
+            /* Bit 25: gswb.frag, which is gsnz.frag with the glow chain's sampling. Those draws (sprites between
+               work buffers) write no depth and test "always", so they always qualify for 23. */
+            if (sBlockSample && vu == 0) {
+                key |= 1u << 25;
+            }
         }
     }
     if (vu == 4) { /* asked for by depth_clut: the table pass, which only depends on blending and the write mask */
@@ -692,6 +702,30 @@ static int pipeline_get(int ctx, int topo, int vu, int shadow) {
         }
         return i;
     }
+}
+
+/* The glow's work buffers at the PS2's own resolution (gfxm_a.c GfxPost_DrawGlow: the 256 x 256 page 0x150, 128 x 128
+   0x170 and the two 64 x 64 pages 0x1F6 and 0x1F8, which the sky's glare, the object glow and the blur of distant
+   things go through). The chain shrinks the picture into them, blurs it by sampling half a texel to the side and
+   adds it back: at the internal resolution half a GS texel is several texels, the filter blended only the two
+   nearest and each step just moved the picture (the glow as a sharp copy of the character beside it). Drawn one
+   texel per GS pixel, in the top left corner of the target's texture (positions and scissor not scaled up,
+   texture coordinates scaled down), the filter is the GS's own, and those passes have SCALE x SCALE fewer pixels
+   than at the internal resolution. The picture they come from and go back to stays at it. BT3_GLOW_NATIVE=0: at
+   the internal resolution, as before (the glow's sampling in gswb.frag then). */
+static int target_lowres(uint32_t fbp) {
+    static int on = -1;
+    if (on < 0) { on = getenv("BT3_GLOW_NATIVE") != NULL ? atoi(getenv("BT3_GLOW_NATIVE")) : 1; }
+    return on && SCALE > 1 && (fbp == 0x150 || fbp == 0x170 || fbp == 0x1F6 || fbp == 0x1F8);
+}
+/* Only while the glow chain runs: GfxPost_DrawGlow marks its start and end in the display list (markers 0x20 and
+   0x21, GsGpu_Native). The same pages hold other things between two glows, at the internal resolution as ever:
+   the fighters' shadow picture (0x150, drawn by vertex program 0 and laid on the stage), the screen as the lens
+   flare, the heat haze and the water wobble take it, the stage's blur. (All four pages at 1x for the whole frame
+   took those down to the PS2's resolution as well.) */
+static int sInGlowChain;
+static int lowres_now(int t) {
+    return sInGlowChain && t >= 0 && target_lowres(gsTargets[t].fbp);
 }
 
 /* The shared target table's entry for a frame-buffer address. The attachments are the back end's: a new
@@ -897,6 +931,28 @@ static int draw_state(int ctx, int topo, int sprite, int vu, GsDraw *d, float *u
             }
             d->tex = sBackend->targetColor(src);
             d->tex_is_target = 1;
+            /* A work buffer (not the picture itself) read with the bilinear filter: the steps of the glow chain
+               shrink, blur and add it back by sampling half a texel to the side, which averages two texels. At a
+               higher internal resolution half a GS texel is several texels, the filter blends only the two nearest
+               (nearly the same colour), and each step just moved the picture: the glow came out as a sharp copy of
+               the character beside it (Super Saiyan hair, reported). orig.x = SCALE: gs.frag samples it as the GS
+               would at 1x, each GS texel the average of its block. (The picture's own copies, the cross-fade, stay
+               sharp: their source is the picture.) Only between work buffers: the passes that lay one over the whole
+               picture (the glow added back, the distance blur) read a buffer that is already smooth, and sixteen
+               reads for every pixel of the picture took a fight at 2x on an integrated chip from 124 pictures a
+               second to 90. */
+            static int block = -1; /* BT3_GLOW_BLOCK=0: read as any texture (to compare) */
+            if (block < 0) { block = getenv("BT3_GLOW_BLOCK") != NULL ? atoi(getenv("BT3_GLOW_BLOCK")) : 1; }
+            /* Outside the glow chain (whose pages are at 1x then: target_lowres) only with "Sharp stage blur" off:
+               the stage's blur and the passes like it between work buffers, as the PS2 samples them. On (the
+               default), they are sampled at the internal resolution as before 0.1.38: crisper than the console,
+               the look of other emulators' upscaling, which players know and preferred (reported). */
+            if (block && !(gsSharpBlur && !sInGlowChain) && SCALE > 1 && gsTargets[src].fbp != (uint32_t)gGsMainFbp && (uint32_t)(gGs.frame[ctx] & 0x1FF) != (uint32_t)gGsMainFbp &&
+                ((gGs.tex1[ctx] >> 5) & 1)) {
+                d->orig[0] = (float)SCALE;
+                sBlockSample = 1;
+
+            }
             {
                 /* The buffer is a corner of a larger texture here, so the GS's own edge handling has to be done
                    by hand: CLAMP gives the texel range per axis (0 repeat and 1 clamp: the texture's size; 2 and
@@ -913,6 +969,16 @@ static int draw_state(int ctx, int topo, int sprite, int vu, GsDraw *d, float *u
             }
             *us = tw / (float)GS_W;
             *vs = th / (float)GS_H;
+            if (lowres_now(src)) { /* (its picture is in the corner: one texel per GS pixel) */
+                int k;
+                for (k = 0; k < 4; k++) {
+                    d->rect[k] /= (float)SCALE;
+                }
+                *us /= (float)SCALE;
+                *vs /= (float)SCALE;
+                d->orig[0] = 0.0f;
+                sBlockSample = 0;
+            }
         } else {
             d->tex = texture_get(ctx);
         }
@@ -925,6 +991,7 @@ static int draw_state(int ctx, int topo, int sprite, int vu, GsDraw *d, float *u
         d->sampler |= 1 | 8; /* (GsGpu_Draw takes the 8 off again for 2D art) */
     }
     d->pipeline = pipeline_get(ctx, topo, vu, 0);
+    sBlockSample = 0;
     d->mode[0] = !tme ? 0 : d->tex_is_target ? 2 : 1; /* 2: a frame buffer as texture, its alpha is already rescaled */
     /* (BT3_TEX_ALPHA=0 switches the replacement's alpha treatment off, for telling which one a fault comes from) */
     if (d->mode[0] == 1 && sLast != NULL && sLast->tex == d->tex && sLast->replaced == 1 &&
@@ -939,10 +1006,13 @@ static int draw_state(int ctx, int topo, int sprite, int vu, GsDraw *d, float *u
     d->misc[1] = ((test >> 14) & 1) ? (float)(1 + (int)((test >> 15) & 1)) : 0.0f; /* DATE, DATM */
     d->misc[2] = (float)(gGs.fba[ctx] & 1);
     d->blendc = (float)((gGs.alpha[ctx] >> 32) & 0xFF) / 128.0f;
-    d->scissor[0] = (int)(sc & 0x7FF) * SCALE;
-    d->scissor[1] = (int)((sc >> 32) & 0x7FF) * SCALE;
-    d->scissor[2] = ((int)((sc >> 16) & 0x7FF) + 1) * SCALE - d->scissor[0];
-    d->scissor[3] = ((int)((sc >> 48) & 0x7FF) + 1) * SCALE - d->scissor[1];
+    {
+        int ts = lowres_now(d->target) ? 1 : SCALE; /* (a work buffer at the PS2's resolution: target_lowres) */
+        d->scissor[0] = (int)(sc & 0x7FF) * ts;
+        d->scissor[1] = (int)((sc >> 32) & 0x7FF) * ts;
+        d->scissor[2] = ((int)((sc >> 16) & 0x7FF) + 1) * ts - d->scissor[0];
+        d->scissor[3] = ((int)((sc >> 48) & 0x7FF) + 1) * ts - d->scissor[1];
+    }
     return 1;
 }
 
@@ -1284,13 +1354,20 @@ void GsGpu_Draw(int type, int ctx, const GsVertex *v) {
             gsVerts[k].s -= ds;
             gsVerts[k].t -= dt;
         }
+        /* Which of the two the chain is. The sky's glare and the glow of characters and objects are the same chain
+           (GfxPost_DrawGlow), run once each; it tints its way back up from 64 x 64 into the 128 x 128 page (0x170)
+           with its last argument: the glare's level as a grey with alpha 0, the object glow 0x80808080. The page's
+           last sprite before the pass that adds the chain to the picture is that one. */
+        if ((uint32_t)(gGs.frame[ctx] & 0x1FF) == 0x170) {
+            sGlowIsGlare = v[1].a == 0;
+        }
         /* the user's strength for the glare and the glow: the pass that adds the blurred buffer to the picture */
-        if (gsGlowPercent != 100 && (uint32_t)(gGs.frame[ctx] & 0x1FF) == (uint32_t)gGsMainFbp && ((gGs.prim >> 6) & 1) &&
-            (gGs.alpha[ctx] & 0xFF) == 0x68) {
-            for (k = d.first; k < gsVertCount; k++) {
-                gsVerts[k].r = (uint8_t)(gsVerts[k].r * gsGlowPercent / 100 > 255 ? 255 : gsVerts[k].r * gsGlowPercent / 100);
-                gsVerts[k].g = (uint8_t)(gsVerts[k].g * gsGlowPercent / 100 > 255 ? 255 : gsVerts[k].g * gsGlowPercent / 100);
-                gsVerts[k].b = (uint8_t)(gsVerts[k].b * gsGlowPercent / 100 > 255 ? 255 : gsVerts[k].b * gsGlowPercent / 100);
+        if ((uint32_t)(gGs.frame[ctx] & 0x1FF) == (uint32_t)gGsMainFbp && ((gGs.prim >> 6) & 1) && (gGs.alpha[ctx] & 0xFF) == 0x68) {
+            int pc = sGlowIsGlare ? gsGlarePercent : gsGlowPercent;
+            for (k = d.first; pc != 100 && k < gsVertCount; k++) {
+                gsVerts[k].r = (uint8_t)(gsVerts[k].r * pc / 100 > 255 ? 255 : gsVerts[k].r * pc / 100);
+                gsVerts[k].g = (uint8_t)(gsVerts[k].g * pc / 100 > 255 ? 255 : gsVerts[k].g * pc / 100);
+                gsVerts[k].b = (uint8_t)(gsVerts[k].b * pc / 100 > 255 ? 255 : gsVerts[k].b * pc / 100);
             }
         }
     }
@@ -1367,6 +1444,16 @@ void GsGpu_Draw(int type, int ctx, const GsVertex *v) {
         }
     }
     d.count = gsVertCount - d.first;
+    if (lowres_now(d.target)) { /* into a work buffer at the PS2's resolution: its corner (target_lowres) */
+        uint32_t k;
+        for (k = d.first; k < gsVertCount; k++) {
+            gsVerts[k].x /= (float)SCALE;
+            gsVerts[k].y /= (float)SCALE;
+        }
+        if (d.misc[3] > 0.0f) {
+            d.misc[3] = 1.0f; /* (one output pixel per GS pixel there) */
+        }
+    }
     gsTargets[d.target].draws++;
     gsTargets[d.target].gen = gGsPageGen[gsTargets[d.target].fbp & 511];
     last = gsDrawCount ? &gsDraws[gsDrawCount - 1] : NULL;
@@ -1431,6 +1518,7 @@ void GsGpu_DrawVu6(int ctx, const float *vertices, uint32_t count, const float *
     }
     gsTargets[d.target].draws++;
     gsTargets[d.target].gen = gGsPageGen[gsTargets[d.target].fbp & 511];
+    u.target[0] = lowres_now(d.target) ? (float)SCALE : 1.0f; /* (a work buffer at the PS2's resolution: target_lowres) */
     last = gsDrawCount ? &gsDraws[gsDrawCount - 1] : NULL;
     if (last != NULL && same_state(last, &d) && memcmp(&gsVuUni[last->uniform], &u, sizeof(u)) == 0) {
         last->count += d.count;
@@ -1478,6 +1566,7 @@ void GsGpu_DrawVu4(int ctx, const float *vertices, uint32_t count, const float *
     gsVuVertCount += count;
     gsTargets[d.target].draws++;
     gsTargets[d.target].gen = gGsPageGen[gsTargets[d.target].fbp & 511];
+    u.target[0] = lowres_now(d.target) ? (float)SCALE : 1.0f; /* (a work buffer at the PS2's resolution: target_lowres) */
     last = gsDrawCount ? &gsDraws[gsDrawCount - 1] : NULL;
     if (last != NULL && same_state(last, &d) && memcmp(&gsVuUni[last->uniform], &u, sizeof(u)) == 0) {
         last->count += d.count;
@@ -1545,6 +1634,7 @@ void GsGpu_DrawVu0(int layer, int ctx, const float *vertices, uint32_t count, co
     gsVuVertCount += count;
     gsTargets[d.target].draws++;
     gsTargets[d.target].gen = gGsPageGen[gsTargets[d.target].fbp & 511];
+    u.target[0] = lowres_now(d.target) ? (float)SCALE : 1.0f; /* (a work buffer at the PS2's resolution: target_lowres) */
     last = gsDrawCount ? &gsDraws[gsDrawCount - 1] : NULL;
     if (last != NULL && same_state(last, &d) && memcmp(&gsVuUni[last->uniform], &u, sizeof(u)) == 0) {
         last->count += d.count;
@@ -1628,6 +1718,10 @@ void GsGpu_Native(int effect) {
     }
     if (effect >= 0x10 && effect <= 0x14) {
         gsAnchor = effect == 0x13 ? 0 : effect == 0x14 ? 4 : effect - 0x0F; /* 1 left, 2 right, 3 centre, 4 by position */
+        return;
+    }
+    if (effect == 0x20 || effect == 0x21) { /* the glow chain begins / ends (target_lowres) */
+        sInGlowChain = effect == 0x20;
         return;
     }
     if (effect != 1 || gsDrawCount == MAX_DRAWS || (gsFxOff & 1)) {
@@ -1723,7 +1817,7 @@ SDL_Window *GsDraw_WindowCreate(int opengl) {
     SDL_DestroyProperties(props);
     SDL_free(displays);
     if (sWindow != NULL && !sFullscreen) {
-        SDL_SetWindowSize(sWindow, (int)((float)896 * want + 0.5f), 896);
+        SDL_SetWindowSize(sWindow, (int)((float)h * want + 0.5f), h); /* (the height BT3_WINDOW asked for, at the picture's shape) */
     }
     fprintf(stderr, "bt3: internal resolution %dx (%d x %d)\n", gsScale, 512 * gsScale, 448 * gsScale);
     return sWindow;
@@ -1772,6 +1866,8 @@ void GsGpu_GetSettings(PortVideo *v) {
     v->fullscreen = sFullscreen;
     v->fxOff = (int)gsFxOff;
     v->glow = gsGlowPercent;
+    v->glare = gsGlarePercent;
+    v->sharpBlur = gsSharpBlur;
     v->music = gPortMusicPercent;
     v->effects = gPortSePercent;
     v->voices = gPortVoicePercent;
@@ -1804,6 +1900,8 @@ void GsGpu_SetSettings(const PortVideo *v) {
     }
     gsFxOff = (unsigned)v->fxOff & 63;
     gsGlowPercent = v->glow;
+    gsGlarePercent = v->glare;
+    gsSharpBlur = v->sharpBlur;
     if (v->music != now.music || v->effects != now.effects || v->voices != now.voices || v->stage != now.stage) { /* (the streams that are playing follow at once) */
         gPortMusicPercent = v->music;
         gPortSePercent = v->effects;
@@ -1838,6 +1936,8 @@ void GsGpu_SetSettings(const PortVideo *v) {
     Port_SettingSave("fullscreen", sFullscreen);
     Port_SettingSave("fx_off", (int)gsFxOff);
     Port_SettingSave("glow", gsGlowPercent);
+    Port_SettingSave("glare", gsGlarePercent);
+    Port_SettingSave("sharp_blur", gsSharpBlur);
     Port_SettingSave("music", gPortMusicPercent);
     Port_SettingSave("effects", gPortSePercent);
     Port_SettingSave("voices", gPortVoicePercent);
@@ -1894,6 +1994,9 @@ int GsGpu_Init(void) {
     gsWhite = sb->whiteTex();
     gsFxOff = (unsigned)(getenv("BT3_FX_OFF") != NULL ? atoi(getenv("BT3_FX_OFF")) : Port_Setting("fx_off", 0)) & 63;
     gsGlowPercent = getenv("BT3_GLOW") != NULL ? atoi(getenv("BT3_GLOW")) : Port_Setting("glow", GLOW_DEFAULT);
+    /* (one strength for both until 2026-10-21: a saved "glow" is the glare's too until it has its own) */
+    gsGlarePercent = getenv("BT3_GLARE") != NULL ? atoi(getenv("BT3_GLARE")) : Port_Setting("glare", gsGlowPercent);
+    gsSharpBlur = (getenv("BT3_SHARP_BLUR") != NULL ? atoi(getenv("BT3_SHARP_BLUR")) : Port_Setting("sharp_blur", 1)) != 0;
     MenuText_SetFontId(Port_Setting("menu_font_id", 0));
     MenuText_SetBattleFontId(Port_Setting("battle_font_id", 0));
     MenuText_SetSharedFontId(Port_Setting("text_font_id", 0));
@@ -4307,6 +4410,7 @@ static void skip_decide(void) {
 }
 
 void GsGpu_FrameEnd(void) {
+    sInGlowChain = 0; /* (a chain is always within one frame) */
     if (gPortResim) { /* a frame that is only being re-run: nothing was recorded, nothing is shown */
         return;
     }
