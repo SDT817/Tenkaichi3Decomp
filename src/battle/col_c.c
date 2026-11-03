@@ -213,6 +213,9 @@ void Font_Init(s32 unused) {
 /* Resets cursor and style, allocates the slots, stacks and command queue, binds the two fonts of the boot file. */
 void Font_InitEx(s32 unused, s32 maxCmds) {
     u32 *boot;
+#ifdef PORT
+    s32 i;
+#endif
 
     gFontReady = 1;
     gFontEnabled = 1;
@@ -253,6 +256,17 @@ void Font_InitEx(s32 unused, s32 maxCmds) {
     boot = gCommonRes->boot;
     Font_SetFont(0, (FontData *)(boot + (boot[1] >> 2)));
     Font_SetFont(1, (FontData *)(boot + (boot[2] >> 2)));
+#ifdef PORT
+    /* Optional local font sheets; the USA boot file leaves these members empty. */
+    for (i = 2; i < FONT_SLOT_COUNT && i < (s32)boot[0]; i++) {
+        u32 start = boot[i + 1] & ~3u;
+        u32 end = boot[i + 2] & ~3u;
+        if (end >= start && end - start >= sizeof(FontData) &&
+            memcmp((u8 *)boot + start, "5tnF 2SP", 8) == 0) {
+            Font_SetFont(i, (FontData *)((u8 *)boot + start));
+        }
+    }
+#endif
 }
 
 /* Frees everything Font_InitEx allocated. */
@@ -1121,6 +1135,13 @@ void Font_SetFont(s32 slot, FontData *data) {
     s->data = data;
     s->unk0C = data->unk1C;
     s->lineHeight = data->lineHeight;
+#ifdef PORT
+    {
+        /* Make renderer-only menu prewarming possible before the first Font_Flush. */
+        extern void MenuText_RegisterGlyphs(int tbp, int cbp, const void *glyphs, int count, int lineHeight);
+        MenuText_RegisterGlyphs(s->tbp, s->cbp, data->glyphs, data->glyphCount, s->lineHeight);
+    }
+#endif
     gFontGlyphGap = 0;
     gFontLineHeight = data->lineHeight;
 }

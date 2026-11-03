@@ -1,6 +1,11 @@
 #include "common.h"
 #include "sys/pad.h"
 #include "sys/game_pad.h"
+#ifdef PORT
+#include "battle/battle.h"
+#include "battle/btl_seq.h"
+#include "port_control_mode.h"
+#endif
 
 /* Translates gPad[pad].held (PAD_*) into the game button word (PADG_*), derives pressed/repeat, copies the sticks. */
 void Pad_UpdateGameButtons(s32 pad) {
@@ -83,6 +88,26 @@ void Pad_UpdateGameButtons(s32 pad) {
         btn |= PADG_UP2;
     }
 
+#ifdef PORT
+    /* Wii menu actions and left-stick navigation, including pause and results. */
+    if (PORT_CONTROL_IS_WII(p->data) &&
+        (!Battle_GetWork()->running || (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) ||
+         (gBtlSeq != NULL && gBtlSeq->state == BTL_SEQ_END))) {
+        u32 face = btn & (PADG_CROSS | PADG_SQUARE | PADG_CIRCLE | PADG_TRIANGLE);
+
+        btn &= ~(PADG_CROSS | PADG_SQUARE | PADG_CIRCLE | PADG_TRIANGLE);
+        if (face & PADG_SQUARE) { btn |= PADG_CROSS; }
+        if (face & PADG_CROSS) { btn |= PADG_TRIANGLE; }
+        if (face & PADG_CIRCLE) { btn |= PADG_CIRCLE; }
+        if (face & PADG_TRIANGLE) { btn |= PADG_SQUARE; }
+        btn &= ~(PADG_LEFT | PADG_RIGHT | PADG_DOWN | PADG_UP |
+                 PADG_LEFT2 | PADG_RIGHT2 | PADG_DOWN2 | PADG_UP2);
+        if (Pad_IsHeld(pad, PAD_LSTICK_LEFT)) { btn |= PADG_LEFT | PADG_LEFT2; }
+        if (Pad_IsHeld(pad, PAD_LSTICK_RIGHT)) { btn |= PADG_RIGHT | PADG_RIGHT2; }
+        if (Pad_IsHeld(pad, PAD_LSTICK_DOWN)) { btn |= PADG_DOWN | PADG_DOWN2; }
+        if (Pad_IsHeld(pad, PAD_LSTICK_UP)) { btn |= PADG_UP | PADG_UP2; }
+    }
+#endif
     p->gamePressed = btn & ~p->gameHeld;
     p->gameHeld = btn;
     gPad[pad].gameRepeat = Pad_CalcRepeat(btn, p->gamePressed, &p->gameRepeatTimer, &p->gameRepeatLast,

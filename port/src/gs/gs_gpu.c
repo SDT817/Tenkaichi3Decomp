@@ -23,6 +23,7 @@
 #include <string.h>
 #include "gs_internal.h"
 #include "gs_draw.h"
+#include "perf_trace.h"
 #include "shaders.h" /* generated: kGsVertSpv, kGsFragSpv */
 #include "ui.h"
 
@@ -637,8 +638,8 @@ static int pipe_get(uint32_t key) {
     return pipeline_create(key, 1);
 }
 
-/* How a finished picture reaches the display. on = 0: without waiting for it (MAILBOX: no tearing, no wait; else
-   IMMEDIATE); on = 1: at its refresh (VSYNC, the settings window's "V-sync"). */
+/* The private release always prefers the accepted local I mode. Unsupported
+   displays fall back to MAILBOX, then VSYNC, regardless of the stored setting. */
 static int sVsyncPending = -1; /* asked for from the settings window: -1 nothing, else 0 / 1 */
 
 static void vsync_apply(int on);
@@ -652,14 +653,15 @@ void GsGpu_Vsync(int on) {
 
 static void vsync_apply(int on) {
     SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
+    (void)on;
     if (sDev == NULL || sWindow == NULL) {
         return;
     }
     SDL_WaitForGPUIdle(sDev); /* (nothing of an earlier frame still on its way to the old swapchain) */
-    if (!on && SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_MAILBOX)) {
-        mode = SDL_GPU_PRESENTMODE_MAILBOX;
-    } else if (!on && SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_IMMEDIATE)) {
+    if (SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_IMMEDIATE)) {
         mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
+    } else if (SDL_WindowSupportsGPUPresentMode(sDev, sWindow, SDL_GPU_PRESENTMODE_MAILBOX)) {
+        mode = SDL_GPU_PRESENTMODE_MAILBOX;
     }
     SDL_SetGPUSwapchainParameters(sDev, sWindow, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
     fprintf(stderr, "bt3: present mode %s\n", mode == SDL_GPU_PRESENTMODE_MAILBOX ? "mailbox" : mode == SDL_GPU_PRESENTMODE_IMMEDIATE ? "immediate" : "vsync");
@@ -690,7 +692,7 @@ static int vk_init(void) {
         return 0;
     }
     /* The game paces itself at 30 frames per second; waiting for the display's own refresh on top of that
-       (VSYNC) costs up to a refresh period per frame. Prefer MAILBOX (no tearing, no wait), then IMMEDIATE. */
+       (VSYNC) costs up to a refresh period per frame. This local release prefers IMMEDIATE, then MAILBOX. */
     vsync_apply(Port_Setting("vsync", 0)); /* (the setting "V-sync" asks for the wait all the same) */
     sVs = shader(SHADER_CODE(kGsVert), SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
     sFs = shader(SHADER_CODE(kGsFrag), SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
@@ -1746,9 +1748,22 @@ static void vk_frame_end(void) {
         }
     }
     {   /* spare images for coming bursts, when this picture left time (the drawing from its list's start) */
+        uint64_t traceSubmit = PerfTrace_Enabled() ? gpu_now() : 0;
         extern uint64_t gDrawStartNs;
         pool_refill(gDrawStartNs != 0 ? gpu_now() - gDrawStartNs : ~0ull);
         targets_refill(gDrawStartNs != 0 ? gpu_now() - gDrawStartNs : ~0ull); /* (and spare render targets) */
+        if (PerfTrace_Enabled() && gDrawStartNs != 0) {
+            extern uint64_t gDrawTexNs, gDrawPipeNs, gDrawUpBytes, gDrawImgNs, gDrawLookNs, gDrawVuNs, gDrawXferNs;
+            extern unsigned gDrawNewTex, gDrawImgMade, gDrawImgFreed, gDrawImgPooled;
+            uint64_t values[PERF_TRACE_VALUES] = {gDrawStartNs, traceSubmit - gDrawStartNs,
+                sEndT[0] > gDrawStartNs ? sEndT[0] - gDrawStartNs : 0,
+                sEndT[1] - sEndT[0], sEndT[2] - sEndT[1], sEndT[3] - sEndT[2],
+                sEndT[4] - sEndT[3], traceSubmit - sEndT[4], gDrawTexNs, gDrawPipeNs, gDrawImgNs,
+                gDrawLookNs, gDrawVuNs, gDrawXferNs, gDrawUpBytes, gDrawNewTex, gDrawImgMade,
+                gDrawImgPooled, gDrawImgFreed, gsDrawCount, gsVertCount, gsVuVertCount,
+                gpu_now() - traceSubmit, gsTexCount};
+            PerfTrace_Write(PERF_TRACE_FRAME, gGsFrame, values);
+        }
     }
     {   /* BT3_GS_VERBOSE: once a second, where the end of the frame spends its time */
         static uint64_t sum[5];

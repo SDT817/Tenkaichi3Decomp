@@ -43,6 +43,9 @@ extern void Font_PushStyle(void);
 extern void Font_SetStyle(void *window);
 extern s32 Font_GetHeight(void *text);
 extern void Font_PrintAt(s32 x, s32 y, void *text);
+#ifdef PORT
+extern const u16 *UiText_TranslateLine(const u32 *table, int line, const u16 *original);
+#endif
 extern void Font_PopStyle(void);
 extern void Font_Flush(s32 state);
 /* fighter / HUD side, not decompiled */
@@ -221,6 +224,9 @@ void BtlScript_UpdateView(void) {
         Font_PushStyle();
         Font_SetStyle(window);
         text = BtlScript_GetText(work->textId);
+#ifdef PORT
+        text = (void *)UiText_TranslateLine((const u32 *)work->textFile, work->textId, (const u16 *)text);
+#endif
         Font_PrintAt(window->unk48, window->unk4C - Font_GetHeight(text), text);
         Font_PopStyle();
         Font_Flush(state);

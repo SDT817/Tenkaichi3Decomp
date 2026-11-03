@@ -77,6 +77,12 @@ extern A11yTitle GAME_PTR gTitle;
 #define TITLE_CHOSEN 1
 #define TITLE_LEAVING 2
 
+/* Title_Term clears gTitle before the mode-1 attract movie/demo runs. */
+int Port_TitleNoticeVisible(void) {
+    return Port_GameMode() == MODE_TITLE && gTitle != NULL &&
+           gTitle->state > 0 && !(gTitle->flags & TITLE_LEAVING);
+}
+
 /* include/sys/dialog.h: Dialog, the memory card window (src/sys/dialog.c) */
 typedef struct {
     uint32_t GAME_PTR titleTbl; /* 0x00: the window's own text file (layout 1: the title and the body) */

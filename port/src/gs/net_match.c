@@ -35,6 +35,7 @@
 
 #define MATCH_URL_DEFAULT "https://odd-surf-0af7.bt3decomp.workers.dev"
 #include "net_match.h"
+#include "http_process.h"
 #include "../port_release.h"
 #include "net_relay.h"
 #include "net_sign.h"
@@ -55,6 +56,44 @@ static struct {
     int watchCount, watchGen;
     SDL_AtomicInt relayAsk, relayGen;      /* a lobby's owner: a relay address is wanted; how many it has got */
 } sM;
+
+/* Quick match: what this game calls itself to the service (so that a room it left behind is not given back to
+   it): sixteen letters made up once per run. */
+static const char *match_who(void) {
+    static char who[20];
+    if (who[0] == '\0') {
+        int i;
+        SDL_srand(SDL_GetTicksNS() ^ (Uint64)(uintptr_t)&who);
+        for (i = 0; i < 16; i++) {
+            who[i] = (char)('a' + SDL_rand(26));
+        }
+        who[16] = '\0';
+    }
+    return who;
+}
+
+/* A search owns its transport and socket parameters, including after cancel.
+   A detached request must never learn the next server's URL or authorization. */
+typedef struct MatchTask {
+    int gen, role, sock, localPort, version;
+    char code[8], queue[8], area[8], name[20], url[224], auth[80];
+} MatchTask;
+static SDL_TLSID sTask;
+static SDL_AtomicInt sTasks;
+static char sPrivateUrl[224], sPrivateAuth[80];
+
+void Match_ConfigurePrivate(const char *url, const char *authorization) {
+    SDL_strlcpy(sPrivateUrl, url != NULL ? url : "", sizeof(sPrivateUrl));
+    SDL_strlcpy(sPrivateAuth, authorization != NULL ? authorization : "", sizeof(sPrivateAuth));
+}
+int Match_TransportIdle(void) { return SDL_GetAtomicInt(&sTasks) == 0; }
+static void SDLCALL task_done(void *arg) {
+    SDL_free(arg);
+    SDL_AddAtomicInt(&sTasks, -1);
+}
+
+static SDL_TLSID sMine; /* the thread's own search number */
+#define STOPPED() (SDL_GetAtomicInt(&sM.cancel) || (int)(intptr_t)SDL_GetTLS(&sMine) != SDL_GetAtomicInt(&sM.gen))
 
 /* The spectators of a poll's answer: "watchers":[["a:p","seen=a"],["b:q"]]. Kept when they changed. */
 static void json_watchers(const char *json) {
@@ -83,6 +122,7 @@ static void json_watchers(const char *json) {
         }
     }
     SDL_LockMutex(sM.lock);
+    if (STOPPED()) { SDL_UnlockMutex(sM.lock); return; }
     if (n != sM.watchCount || SDL_memcmp(addr, sM.watchAddr, sizeof(addr[0]) * (size_t)n) != 0) {
         SDL_memcpy(sM.watchAddr, addr, sizeof(addr[0]) * (size_t)n);
         sM.watchCount = n;
@@ -91,26 +131,10 @@ static void json_watchers(const char *json) {
     SDL_UnlockMutex(sM.lock);
 }
 
-/* Quick match: what this game calls itself to the service (so that a room it left behind is not given back to
-   it): sixteen letters made up once per run. */
-static const char *match_who(void) {
-    static char who[20];
-    if (who[0] == '\0') {
-        int i;
-        SDL_srand(SDL_GetTicksNS() ^ (Uint64)(uintptr_t)&who);
-        for (i = 0; i < 16; i++) {
-            who[i] = (char)('a' + SDL_rand(26));
-        }
-        who[16] = '\0';
-    }
-    return who;
-}
-
-static SDL_TLSID sMine; /* the thread's own search number */
-#define STOPPED() (SDL_GetAtomicInt(&sM.cancel) || (int)(intptr_t)SDL_GetTLS(&sMine) != SDL_GetAtomicInt(&sM.gen))
 
 static const char *match_url(void) {
-    const char *e = SDL_getenv("BT3_MATCH_URL");
+    MatchTask *job = SDL_GetTLS(&sTask);
+    const char *e = job != NULL ? job->url : SDL_getenv("BT3_MATCH_URL");
     return e != NULL && e[0] != '\0' ? e : MATCH_URL_DEFAULT;
 }
 
@@ -119,6 +143,7 @@ static void set_state(int state, const char *error) {
         return;
     }
     SDL_LockMutex(sM.lock);
+    if (STOPPED()) { SDL_UnlockMutex(sM.lock); return; }
     sM.st.state = state;
     if (error != NULL) {
         SDL_strlcpy(sM.st.error, error, sizeof(sM.st.error));
@@ -266,6 +291,16 @@ static int http_post_native(const char *url, const char *json, const char *const
 }
 #endif
 
+int Match_Http(const char *url, const char *json, const char *authorization, char *out, size_t size) {
+    char head[160];
+    const char *headers[2] = {NULL, NULL};
+    if (authorization != NULL && authorization[0] != '\0') {
+        SDL_snprintf(head, sizeof(head), "X-BT3-Lobby-Key: %s", authorization);
+        headers[0] = head;
+    }
+    return http_post_native(url, json, headers, out, size);
+}
+
 /* The build key (net_sign.c). The service checks the time a request is signed for against its own clock (five
    minutes either way), and a player's clock can be wrong by more: so the game keeps how far the service's clock is
    ahead of this computer's. It learns that from the answer to "hello" (asked when the online screen opens), and
@@ -283,7 +318,8 @@ static void clock_learn(const char *answer) {
 /* POSTs `json` to <url>/v1/<what>; the answer's text in out. 0 = no answer. The system's own HTTPS first (above); if
    that is not to be had, the `curl` program. */
 static int http_post_once(const char *what, const char *json, char *out, size_t size) {
-    char url[256], path[64], sig[65], head[3][96];
+    char url[320], path[64], sig[65], head[3][96];
+    MatchTask *job = SDL_GetTLS(&sTask);
     const char *args[20], *headers[4] = {NULL, NULL, NULL, NULL};
     SDL_Process *p;
     size_t got = 0;
@@ -293,7 +329,10 @@ static int http_post_once(const char *what, const char *json, char *out, size_t 
 
     SDL_snprintf(url, sizeof(url), "%s/v1/%s", match_url(), what);
     SDL_snprintf(path, sizeof(path), "/v1/%s", what);
-    if (Sign_Request("POST", path, PORT_RELEASE, when, json, sig)) { /* (a program without a key: no headers) */
+    if (job != NULL && job->auth[0] != '\0') {
+        SDL_snprintf(head[0], sizeof(head[0]), "X-BT3-Room: %s", job->auth);
+        headers[0] = head[0];
+    } else if (Sign_Request("POST", path, PORT_RELEASE, when, json, sig)) { /* (a program without a key: no headers) */
         SDL_snprintf(head[0], sizeof(head[0]), "X-BT3-Release: %d", PORT_RELEASE);
         SDL_snprintf(head[1], sizeof(head[1]), "X-BT3-Time: %lld", when);
         SDL_snprintf(head[2], sizeof(head[2]), "X-BT3-Sign: %s", sig);
@@ -322,11 +361,12 @@ static int http_post_once(const char *what, const char *json, char *out, size_t 
         args[n++] = headers[i];
     }
     args[n] = NULL;
-    p = SDL_CreateProcess(args, true);
+    p = HttpProcess_Create(args, true);
     if (p == NULL) {
         return 0;
     }
     data = SDL_ReadProcess(p, &got, &code);
+    HttpProcess_ExitCode(p, &code);
     SDL_DestroyProcess(p);
     if (data == NULL) {
         return 0;
@@ -505,25 +545,29 @@ static int lan_address(int localPort, char *out, size_t size) {
 
 static int SDLCALL match_thread(void *arg) {
     char pub[64] = "", lan[64] = "", addrs[160], body[512], answer[4096], key[40] = "", you[64] = "", name[20], relayAddr[64] = "";
-    int i, n = 0, hosting, searches = 0, again = 0;
-    Uint64 began = SDL_GetTicks(); /* (a quick match: when the search began, for `waited`) */
+    int i, n = 0, hosting, searches = 0, requireRelay = 0, again = 0;
+    Uint64 began = SDL_GetTicks();
+    MatchTask *job = arg;
 
-    SDL_SetTLS(&sMine, arg, NULL);
-    for (i = 0; sM.name[i] != '\0' && n < (int)sizeof(name) - 1; i++) { /* (a name that needs no escaping) */
-        char c = sM.name[i];
+    SDL_SetTLS(&sTask, job, task_done);
+    SDL_SetTLS(&sMine, (void *)(intptr_t)job->gen, NULL);
+    if (STOPPED()) return 0;
+    for (i = 0; job->name[i] != '\0' && n < (int)sizeof(name) - 1; i++) { /* (a name that needs no escaping) */
+        char c = job->name[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '-' || c == '.') {
             name[n++] = c;
         }
     }
     name[n] = '\0';
-    if (!stun_ask(sM.sock, "stun.cloudflare.com", 3478, pub, sizeof(pub))) {
-        stun_ask(sM.sock, "stun.l.google.com", 19302, pub, sizeof(pub));
+    if (!stun_ask(job->sock, "stun.cloudflare.com", 3478, pub, sizeof(pub))) {
+        stun_ask(job->sock, "stun.l.google.com", 19302, pub, sizeof(pub));
     }
-    lan_address(sM.localPort, lan, sizeof(lan));
+    lan_address(job->localPort, lan, sizeof(lan));
     if (STOPPED()) {
         return 0;
     }
     SDL_LockMutex(sM.lock);
+    if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
     SDL_strlcpy(sM.st.self, pub, sizeof(sM.st.self));
     SDL_UnlockMutex(sM.lock);
     /* (no public address found: the Worker's view of this machine's address with the local port is tried in its
@@ -535,16 +579,16 @@ static int SDLCALL match_thread(void *arg) {
         return 0;
     }
 again:
-    hosting = sM.role == 1 || sM.role == 5;
-    if (sM.role == 3) {
+    hosting = job->role == 1 || job->role == 5;
+    if (job->role == 3) {
         /* A quick match: the service puts this player with whoever waits longest in the queue (then this is the
            one who joins), or gives it a room of its own in the queue to wait in (then it is the host). A room
            lasts ten minutes; when it runs out the search simply starts again. */
         MatchStatus st;
         /* (`waited` and `area`: this game knows nearby matching, and searches again from its room when the service
            says `again`; see port/matchmaking/worker.js) */
-        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"name\":\"%s\",\"addrs\":[%s],\"queue\":\"%s\",\"who\":\"%s\",\"waited\":%d,\"area\":\"%s\"%s}", sM.version, PORT_RELEASE, name, addrs,
-                     sM.queue, match_who(), (int)((SDL_GetTicks() - began) / 1000), sM.area, relayAddr[0] != '\0' ? ",\"relay\":false" : "");
+        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"name\":\"%s\",\"addrs\":[%s],\"queue\":\"%s\",\"who\":\"%s\",\"waited\":%d,\"area\":\"%s\"%s}", job->version, PORT_RELEASE, name, addrs,
+                     job->queue, match_who(), (int)((SDL_GetTicks() - began) / 1000), job->area, relayAddr[0] != '\0' ? ",\"relay\":false" : "");
         if (!http_post("quick", body, answer, sizeof(answer))) {
             set_state(-1, "The matchmaking service could not be reached (is the network up?).");
             return 0;
@@ -556,6 +600,7 @@ again:
         SDL_memset(&st, 0, sizeof(st));
         if (SDL_strstr(answer, "\"role\":\"join\"") != NULL && json_peer(answer, &st)) {
             SDL_LockMutex(sM.lock);
+            if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
             SDL_strlcpy(sM.st.peerName, st.peerName, sizeof(sM.st.peerName));
             SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
             sM.st.peerCount = st.peerCount;
@@ -563,7 +608,7 @@ again:
             sM.st.state = 3;
             json_str(answer, "region", sM.st.region, sizeof(sM.st.region));
             SDL_UnlockMutex(sM.lock);
-            json_str(answer, "code", sM.code, sizeof(sM.code));
+            json_str(answer, "code", job->code, sizeof(job->code));
             json_str(answer, "key", key, sizeof(key));
             goto joined;
         }
@@ -578,13 +623,14 @@ again:
         hosting = 1;
         again = json_int(answer, "again", 0);
         SDL_LockMutex(sM.lock);
+        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
         sM.st.widen = json_int(answer, "widen", 0);
         SDL_UnlockMutex(sM.lock);
     }
     if (hosting) {
-        if (sM.role == 1 || sM.role == 5) {
-            SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"name\":\"%s\",\"addrs\":[%s]%s}", sM.version, PORT_RELEASE, name, addrs,
-                         sM.role == 5 ? ",\"lobby\":true" : "");
+        if (job->role == 1 || job->role == 5) {
+            SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"name\":\"%s\",\"addrs\":[%s]%s}", job->version, PORT_RELEASE, name, addrs,
+                         job->role == 5 ? ",\"lobby\":true" : "");
             if (!http_post("host", body, answer, sizeof(answer))) {
                 set_state(-1, "The matchmaking service could not be reached (is the network up?).");
                 return 0;
@@ -593,15 +639,16 @@ again:
                 return 0;
             }
         }
-        if (!json_str(answer, "code", sM.code, sizeof(sM.code)) || !json_str(answer, "key", key, sizeof(key))) {
+        if (!json_str(answer, "code", job->code, sizeof(job->code)) || !json_str(answer, "key", key, sizeof(key))) {
             set_state(-1, SDL_strstr(answer, "no lobbies") != NULL ? "The matchmaking service does not take lobbies yet. A lobby by address (a port) still works." :
                           SDL_strstr(answer, "\"old\"") != NULL ? "Update available. Online servers are unreachable until you update." :
                           KEY_REFUSED(answer) ? key_refused(answer, "Room codes need an official release of the game. Playing by address still works.") :
                           SDL_strstr(answer, "busy") != NULL ? "Too many rooms from this address; try again in a few minutes." : "The matchmaking service gave no room.");
             return 0;
         }
+        requireRelay = job->auth[0] && SDL_strstr(answer, "\"relayOnly\":true") != NULL;
         if (relayAddr[0] != '\0') { /* (a search begun again: the relay address it holds already goes with the new room) */
-            SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", sM.code, key, addrs, relayAddr);
+            SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", job->code, key, addrs, relayAddr);
             http_post("addrs", body, answer, sizeof(answer));
         } else {
             /* A relay address, if the service gives access to one: published with the others, for a player who
@@ -613,27 +660,32 @@ again:
                 fprintf(stderr, "relay: the service %s%s\n", SDL_strstr(answer, "\"turn\"") != NULL ? "gave access" : "gave no access: ", why);
             }
             if (SDL_getenv("BT3_NO_RELAY") == NULL && json_str(answer, "server", server, sizeof(server)) && json_str(answer, "username", user, sizeof(user)) &&
-                json_str(answer, "credential", pass, sizeof(pass)) && Relay_Allocate(sM.sock, server, user, pass, relay, sizeof(relay)) && !STOPPED()) {
-                SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", sM.code, key, addrs, relay);
+                json_str(answer, "credential", pass, sizeof(pass)) && Relay_Allocate(job->sock, server, user, pass, relay, sizeof(relay)) && !STOPPED()) {
+                SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", job->code, key, addrs, relay);
                 http_post("addrs", body, answer, sizeof(answer));
                 SDL_strlcpy(relayAddr, relay, sizeof(relayAddr));
             }
         }
+        if (requireRelay && !relayAddr[0]) {
+            set_state(-1, "The selected server's TURN relay could not be allocated.");
+            return 0;
+        }
         if (STOPPED()) {
-            SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", sM.code, key);
+            SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", job->code, key);
             http_post("leave", body, answer, sizeof(answer));
             return 0;
         }
         SDL_LockMutex(sM.lock);
-        SDL_strlcpy(sM.st.code, sM.code, sizeof(sM.st.code)); /* (shown from here on) */
+        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
+        SDL_strlcpy(sM.st.code, job->code, sizeof(sM.st.code)); /* (shown from here on) */
         sM.st.role = 1;
         sM.st.searches = searches;
         sM.st.state = 2;
         SDL_UnlockMutex(sM.lock);
-        if (sM.role == 5) {
+        if (job->role == 5) {
             goto lobby;
         }
-        SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"%s}", sM.code, key, sM.watch ? ",\"watch\":true" : "");
+        SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"%s}", job->code, key, sM.watch ? ",\"watch\":true" : "");
         Uint64 searched = SDL_GetTicks();
         for (i = 0; i < 165 && !STOPPED(); i++) { /* a room lasts ten minutes */
             int k;
@@ -644,7 +696,7 @@ again:
             if (STOPPED()) {
                 break;
             }
-            if (sM.role == 3 && again > 0 && SDL_GetTicks() - searched >= (Uint64)again * 1000) {
+            if (job->role == 3 && again > 0 && SDL_GetTicks() - searched >= (Uint64)again * 1000) {
                 /* A quick match that waits searches again from its room (every `again` seconds, as the service
                    says): someone nearer may have come, or (Auto) it now looks everywhere, and two who both wait
                    meet this way. The service holds the room meanwhile: someone who has joined it is not lost
@@ -653,11 +705,12 @@ again:
                 MatchStatus st;
                 searched = SDL_GetTicks();
                 SDL_snprintf(ask, sizeof(ask), "{\"v\":%d,\"rel\":%d,\"name\":\"%s\",\"addrs\":[%s],\"queue\":\"%s\",\"who\":\"%s\",\"waited\":%d,\"area\":\"%s\",\"code\":\"%s\",\"key\":\"%s\"}",
-                             sM.version, PORT_RELEASE, name, addrs, sM.queue, match_who(), (int)((searched - began) / 1000), sM.area, sM.code, key);
+                             job->version, PORT_RELEASE, name, addrs, job->queue, match_who(), (int)((searched - began) / 1000), job->area, job->code, key);
                 if (http_post("quick", ask, answer, sizeof(answer)) && !STOPPED()) {
                     SDL_memset(&st, 0, sizeof(st));
                     if (SDL_strstr(answer, "\"role\":\"join\"") != NULL && json_peer(answer, &st)) { /* (its own room is gone) */
                         SDL_LockMutex(sM.lock);
+                        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
                         SDL_strlcpy(sM.st.peerName, st.peerName, sizeof(sM.st.peerName));
                         SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
                         sM.st.peerCount = st.peerCount;
@@ -665,7 +718,7 @@ again:
                         sM.st.state = 3;
                         json_str(answer, "region", sM.st.region, sizeof(sM.st.region));
                         SDL_UnlockMutex(sM.lock);
-                        json_str(answer, "code", sM.code, sizeof(sM.code));
+                        json_str(answer, "code", job->code, sizeof(job->code));
                         json_str(answer, "key", key, sizeof(key));
                         goto joined;
                     }
@@ -686,6 +739,7 @@ again:
                         break;
                     }
                     SDL_LockMutex(sM.lock);
+                    if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
                     SDL_strlcpy(sM.st.peerName, st.peerName, sizeof(sM.st.peerName));
                     SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
                     sM.st.peerCount = st.peerCount;
@@ -722,13 +776,14 @@ again:
                                 int got;
                                 SDL_SetAtomicInt(&sM.sockBusy, 1);
                                 SDL_Delay(80); /* (the lobby is between two looks at the socket by then) */
-                                got = !STOPPED() && Relay_Allocate(sM.sock, server, user, pass, relay, sizeof(relay));
+                                got = !STOPPED() && Relay_Allocate(job->sock, server, user, pass, relay, sizeof(relay));
                                 SDL_SetAtomicInt(&sM.sockBusy, 0);
                                 if (got && !STOPPED()) {
                                     char more[512];
-                                    SDL_snprintf(more, sizeof(more), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", sM.code, key, addrs, relay);
+                                    SDL_snprintf(more, sizeof(more), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", job->code, key, addrs, relay);
                                     http_post("addrs", more, answer, sizeof(answer));
                                     SDL_LockMutex(sM.lock);
+                                    if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
                                     sM.st.relayGen++;
                                     SDL_UnlockMutex(sM.lock);
                                 }
@@ -753,14 +808,14 @@ again:
             http_post("leave", body, answer, sizeof(answer));
             return 0;
         }
-        if (sM.role == 3) { /* (a quick match waits for as long as the player does) */
+        if (job->role == 3) { /* (a quick match waits for as long as the player does) */
             http_post("leave", body, answer, sizeof(answer));
             goto again;
         }
         set_state(-1, "Nobody joined: the room code has run out. Host again for a new one.");
-    } else if (sM.role == 4) { /* a spectator: the host's addresses (and the host learns this one's by its poll) */
+    } else if (job->role == 4) { /* a spectator: the host's addresses (and the host learns this one's by its poll) */
         MatchStatus st;
-        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"lobby\":1,\"code\":\"%s\",\"name\":\"%s\",\"addrs\":[%s]}", sM.version, PORT_RELEASE, sM.code, name, addrs);
+        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"lobby\":1,\"code\":\"%s\",\"name\":\"%s\",\"addrs\":[%s]}", job->version, PORT_RELEASE, job->code, name, addrs);
         if (!http_post("watch", body, answer, sizeof(answer))) {
             set_state(-1, "The matchmaking service could not be reached (is the network up?).");
             return 0;
@@ -781,6 +836,7 @@ again:
             return 0;
         }
         SDL_LockMutex(sM.lock);
+        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
         SDL_strlcpy(sM.st.peerName, st.peerName, sizeof(sM.st.peerName));
         SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
         sM.st.peerCount = st.peerCount;
@@ -795,7 +851,7 @@ again:
     } else {
         MatchStatus st;
         /* (`lobby`: this game can be a lobby's member; a code of a lobby is then answered as one) */
-        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"lobby\":1,\"code\":\"%s\",\"name\":\"%s\",\"addrs\":[%s]}", sM.version, PORT_RELEASE, sM.code, name, addrs);
+        SDL_snprintf(body, sizeof(body), "{\"v\":%d,\"rel\":%d,\"lobby\":1,\"code\":\"%s\",\"name\":\"%s\",\"addrs\":[%s]}", job->version, PORT_RELEASE, job->code, name, addrs);
         if (!http_post("join", body, answer, sizeof(answer))) {
             set_state(-1, "The matchmaking service could not be reached (is the network up?).");
             return 0;
@@ -815,6 +871,7 @@ again:
             return 0;
         }
         SDL_LockMutex(sM.lock);
+        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
         SDL_strlcpy(sM.st.peerName, st.peerName, sizeof(sM.st.peerName));
         SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
         sM.st.peerCount = st.peerCount;
@@ -830,7 +887,7 @@ lobby:
        for the members who have joined with the code (their addresses, as spectators', Match_Watchers); the lobby
        knocks at each and lets it through its relay. A relay address is asked for when the lobby says a member
        cannot reach it directly (Match_RelayAsk), once a member has come. */
-    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"watch\":true,\"keep\":true}", sM.code, key);
+    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"watch\":true,\"keep\":true}", job->code, key);
     {
         int first = 1;
         while (!STOPPED()) {
@@ -848,7 +905,7 @@ lobby:
                 if (relayAddr[0] != '\0' || SDL_getenv("BT3_NO_RELAY") != NULL) {
                     continue;
                 }
-                SDL_snprintf(ask, sizeof(ask), "{\"code\":\"%s\",\"key\":\"%s\"}", sM.code, key);
+                SDL_snprintf(ask, sizeof(ask), "{\"code\":\"%s\",\"key\":\"%s\"}", job->code, key);
                 if (http_post("relay", ask, answer, sizeof(answer))) {
                     if (SDL_getenv("BT3_RELAY_LOG") != NULL) {
                         char why[160] = "";
@@ -860,11 +917,11 @@ lobby:
                         int got;
                         SDL_SetAtomicInt(&sM.sockBusy, 1);
                         SDL_Delay(80); /* (the lobby is between two looks at the socket by then) */
-                        got = !STOPPED() && Relay_Allocate(sM.sock, server, user, pass, relay, sizeof(relay));
+                        got = !STOPPED() && Relay_Allocate(job->sock, server, user, pass, relay, sizeof(relay));
                         SDL_SetAtomicInt(&sM.sockBusy, 0);
                         if (got && !STOPPED()) {
                             char more[512];
-                            SDL_snprintf(more, sizeof(more), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", sM.code, key, addrs, relay);
+                            SDL_snprintf(more, sizeof(more), "{\"code\":\"%s\",\"key\":\"%s\",\"addrs\":[%s,\"relay=%s\"]}", job->code, key, addrs, relay);
                             http_post("addrs", more, answer, sizeof(answer));
                             SDL_strlcpy(relayAddr, relay, sizeof(relayAddr));
                             SDL_AddAtomicInt(&sM.relayGen, 1);
@@ -882,14 +939,14 @@ lobby:
             }
         }
     }
-    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", sM.code, key);
+    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", job->code, key);
     http_post("leave", body, answer, sizeof(answer));
     return 0;
 keep:
     /* A host that lets spectators in, once the other player has come: the room is kept while the match is on (the
        session ends this search, Match_Cancel), and asked every five seconds for spectators who have come (the
        service's requests a day: 720 an hour of match). */
-    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"watch\":true,\"keep\":true}", sM.code, key);
+    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\",\"watch\":true,\"keep\":true}", job->code, key);
     while (!STOPPED()) {
         int w;
         for (w = 0; w < 50 && !STOPPED(); w++) {
@@ -905,20 +962,21 @@ keep:
             json_watchers(answer);
         }
     }
-    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", sM.code, key);
+    SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", job->code, key);
     http_post("leave", body, answer, sizeof(answer));
     return 0;
 joined:
     /* The one who joined. If the host's direct addresses stay silent, the host asks for a relay address and adds it
        to the room: asked for here every two seconds, from the third second on, until the lobby ends this search
        (connected, or given up) or the address has come. */
-    if (key[0] != '\0' && sM.code[0] != '\0') {
+    if (key[0] != '\0' && job->code[0] != '\0') {
         MatchStatus st;
         int round, w, known;
         SDL_LockMutex(sM.lock);
+        if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
         known = sM.st.peerCount;
         SDL_UnlockMutex(sM.lock);
-        SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", sM.code, key);
+        SDL_snprintf(body, sizeof(body), "{\"code\":\"%s\",\"key\":\"%s\"}", job->code, key);
         for (round = 0; round < 11 && !STOPPED(); round++) {
             for (w = 0; w < (round == 0 ? 30 : 20) && !STOPPED(); w++) {
                 SDL_Delay(100);
@@ -932,6 +990,7 @@ joined:
             SDL_memset(&st, 0, sizeof(st));
             if (json_peer(answer, &st) && SDL_strstr(answer, "relay=") != NULL && st.peerCount != known && !STOPPED()) {
                 SDL_LockMutex(sM.lock);
+                if (STOPPED()) { SDL_UnlockMutex(sM.lock); return 0; }
                 SDL_memcpy(sM.st.peerAddr, st.peerAddr, sizeof(st.peerAddr));
                 sM.st.peerCount = st.peerCount;
                 sM.st.addrGen++;
@@ -957,6 +1016,7 @@ void Match_Begin(int role, int sock, int localPort, const char *code, const char
         SDL_DetachThread(sM.thread); /* (it stops by itself: its search number is no longer the current one) */
         sM.thread = NULL;
     }
+    SDL_LockMutex(sM.lock);
     SDL_AddAtomicInt(&sM.gen, 1);
     SDL_SetAtomicInt(&sM.cancel, 0);
     SDL_memset(&sM.st, 0, sizeof(sM.st));
@@ -981,10 +1041,26 @@ void Match_Begin(int role, int sock, int localPort, const char *code, const char
     sM.watchCount = 0;
     sM.watchGen++;
     SDL_SetAtomicInt(&sM.relayAsk, 0);
-    sM.thread = SDL_CreateThread(match_thread, "bt3-match", (void *)(intptr_t)SDL_GetAtomicInt(&sM.gen));
-    if (sM.thread == NULL) {
-        set_state(-1, "The matchmaking could not be started.");
+    {
+        MatchTask *job = SDL_calloc(1, sizeof(*job));
+        if (job == NULL) { sM.st.state = -1; SDL_UnlockMutex(sM.lock); return; }
+        job->gen = SDL_GetAtomicInt(&sM.gen);
+        job->role = role; job->sock = sock; job->localPort = localPort; job->version = version;
+        SDL_strlcpy(job->code, sM.code, sizeof(job->code));
+        SDL_strlcpy(job->name, sM.name, sizeof(job->name));
+        SDL_strlcpy(job->queue, sM.queue, sizeof(job->queue));
+        SDL_strlcpy(job->area, sM.area, sizeof(job->area));
+        SDL_strlcpy(job->url, sPrivateUrl[0] ? sPrivateUrl : match_url(), sizeof(job->url));
+        SDL_strlcpy(job->auth, sPrivateAuth, sizeof(job->auth));
+        SDL_AddAtomicInt(&sTasks, 1);
+        sM.thread = SDL_CreateThread(match_thread, "bt3-match", job);
+        if (sM.thread == NULL) task_done(job);
     }
+    if (sM.thread == NULL) {
+        SDL_strlcpy(sM.st.error, "The matchmaking could not be started.", sizeof(sM.st.error));
+        sM.st.state = -1;
+    }
+    SDL_UnlockMutex(sM.lock);
 }
 
 /* ---- how many wait in each quick-match queue (for the window): asked in a thread of its own, now and then ---- */

@@ -1,0 +1,31 @@
+# Coturn UDP only: matches the existing, unmodified game client.
+listening-port=3478
+listening-ip=0.0.0.0
+relay-ip=PUBLIC_IPV4
+external-ip=PUBLIC_IPV4
+min-port=49160
+max-port=49259
+realm=BT3_PRIVATE_LOBBY
+fingerprint
+use-auth-secret
+static-auth-secret=CHANGE_TO_THE_SAME_COTURN_SHARED_SECRET
+stale-nonce=600
+no-tcp
+no-tls
+no-dtls
+no-cli
+no-multicast-peers
+user-quota=4
+total-quota=64
+max-allocate-lifetime=600
+# Refuse forwarding to services on the relay machine / private networks.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+# Do not enable allow-loopback-peers in a public deployment.
+simple-log
+log-file=stdout

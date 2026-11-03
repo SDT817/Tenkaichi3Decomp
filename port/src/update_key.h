@@ -16,7 +16,7 @@
 #ifndef PORT_UPDATE_KEY_H
 #define PORT_UPDATE_KEY_H
 /* PLACEHOLDER (zeros): REPLACE with the output of `update_key.py generate` before the first signed release. */
-#define PORT_UPDATE_KEY_RELEASE "e6d94b546355ddbb34f549df298cb9bcbeda034d29f4b182f77e5a19d177dcad"
+#define PORT_UPDATE_KEY_RELEASE "ce5990d7da701b89b1deb00d15a8adbfe1a09b52cb7bd57b1f36f84abae11de4"
 
 /* (Testing only: a developer's build made with BT3_UPDATE_TEST_KEY=<hex> in its environment checks with that key
    instead, so that archives signed with a throw-away key can be tried; port/tools/undefined.py writes it into the

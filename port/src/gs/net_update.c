@@ -48,10 +48,12 @@
 #include <unistd.h>
 #endif
 #include "net_update.h"
+#include "http_process.h"
 #include "update_sign.h"
 #include "port_version.h" /* (generated: PORT_VERSION) */
 #include "../port_release.h"
 #include "../update_key.h"
+#include "../local_release.h"
 
 int UpdCrypto_Check(const uint8_t sig[64], const uint8_t pub[32], const uint8_t *msg, size_t size); /* update_crypto.c */
 
@@ -87,14 +89,14 @@ static struct {
     char latest[32], page[256], why[512], cannot[256];
     char *notes;
     Asset zip, sig;
-    int canInstall;
+    int canInstall, installRetries;
     char root[1024], work[1100], part[1200], file[1200], sha[65];
     long long got;
     Uint64 gotAt;
 } sU;
 
 const char *Update_Version(void) {
-    return PORT_VERSION;
+    return BT3_LOCAL_VERSION;
 }
 
 static void lock(void) {
@@ -118,7 +120,7 @@ static void fail(const char *why) {
 
 static const char *api_base(void) {
     const char *b = SDL_getenv("BT3_UPDATE_API");
-    return b != NULL && b[0] != '\0' ? b : "https://api.github.com";
+    return b != NULL && b[0] != '\0' ? b : BT3_LOCAL_UPDATE_URL;
 }
 
 /* ---- HTTP GET, into memory or into a file ---- */
@@ -327,7 +329,7 @@ static int http_program(const char *url, int json, const char *path, Sink *s) {
     }
     args[n++] = url;
     args[n] = NULL;
-    p = SDL_CreateProcess(args, path == NULL);
+    p = HttpProcess_Create(args, path == NULL);
     if (p == NULL) {
         return 0;
     }
@@ -343,6 +345,7 @@ static int http_program(const char *url, int json, const char *path, Sink *s) {
     } else {
         SDL_WaitProcess(p, true, &code);
     }
+    HttpProcess_ExitCode(p, &code);
     SDL_DestroyProcess(p);
     return code == 0;
 }
@@ -351,6 +354,16 @@ static int http_program(const char *url, int json, const char *path, Sink *s) {
 static int http_get(const char *url, int json, const char *path, char **mem, size_t *memLen, size_t max) {
     Sink s;
     int ok = 0;
+    char bridged[1400];
+    /* The launcher verifies the pinned private TLS certificate. No public
+       endpoint or official release is consulted by this edition. */
+    if (SDL_strncmp(url, BT3_LOCAL_UPDATE_URL "/updates/", sizeof(BT3_LOCAL_UPDATE_URL "/updates/")-1) == 0) {
+        const char *local = SDL_getenv("BT3_LOBBY_GATEWAY_LOCAL");
+        unsigned port; char extra;
+        if (!local || sscanf(local, "http://127.0.0.1:%u%c", &port, &extra) != 1 || !port || port > 65535) return 0;
+        SDL_snprintf(bridged, sizeof(bridged), "%s%s", local, url + sizeof(BT3_LOCAL_UPDATE_URL)-1);
+        url = bridged;
+    }
 
     memset(&s, 0, sizeof(s));
     s.max = max;
@@ -645,15 +658,15 @@ static int SDLCALL check_thread(void *arg) {
     Asset zip, sig;
 
     (void)arg;
-    SDL_snprintf(url, sizeof(url), "%s/repos/" PORT_UPDATE_REPO "/releases/latest", api_base());
+    SDL_snprintf(url, sizeof(url), "%s/updates/latest.json", api_base());
     if (!http_get(url, 1, NULL, &json, &len, JSON_MAX) || !js_string(js_get(json, "tag_name"), tag, sizeof(tag))) {
         fprintf(stderr, "bt3: update check: no answer\n");
         SDL_free(json);
         SDL_SetAtomicInt(&sU.state, UPD_NONE);
         return 0;
     }
-    cmp = UpdateVer_Compare(PORT_VERSION, tag);
-    fprintf(stderr, "bt3: update check: the newest release is %s, this is %s%s\n", tag, PORT_VERSION,
+    cmp = UpdateVer_Compare(BT3_LOCAL_VERSION, tag);
+    fprintf(stderr, "bt3: update check: the newest release is %s, this is %s%s\n", tag, BT3_LOCAL_VERSION,
             cmp == -1 ? ": an update is available" : cmp == -2 ? " (no update is offered)" : "");
     if (cmp != -1) {
         SDL_free(json);
@@ -694,7 +707,7 @@ static int SDLCALL check_thread(void *arg) {
         SDL_strlcpy(sU.latest, t, sizeof(sU.latest));
     }
     if (!js_string(js_get(json, "html_url"), sU.page, sizeof(sU.page)) || SDL_strncmp(sU.page, "https://", 8) != 0) {
-        SDL_snprintf(sU.page, sizeof(sU.page), "https://github.com/" PORT_UPDATE_REPO "/releases/latest");
+        SDL_snprintf(sU.page, sizeof(sU.page), BT3_LOCAL_UPDATE_URL "/updates/notes.txt");
     }
     SDL_free(sU.notes);
     sU.notes = notes;
@@ -724,7 +737,7 @@ void Update_Check(void) {
         return;
     }
     folders();
-    if (UpdateVer_Compare(PORT_VERSION, PORT_VERSION) == -2) { /* a "dev" build: nothing to compare with */
+    if (UpdateVer_Compare(BT3_LOCAL_VERSION, BT3_LOCAL_VERSION) == -2) { /* a "dev" build: nothing to compare with */
         fprintf(stderr, "bt3: update check: this is a development build (%s): no updates are offered\n", PORT_VERSION);
         SDL_SetAtomicInt(&sU.state, UPD_NONE);
         return;
@@ -739,7 +752,16 @@ void Update_Check(void) {
 }
 
 /* ---- the download and its checks ---- */
-static int SDLCALL download_thread(void *arg) {
+/* A failed transfer or hash check retries without exposing a terminal failure
+   between attempts. Existing signature validation remains mandatory. */
+static void download_error(const char *why) {
+    lock();
+    SDL_strlcpy(sU.why, why, sizeof(sU.why));
+    unlock();
+    fprintf(stderr, "bt3: update: %s\n", why);
+}
+
+static int SDLCALL download_once(void *arg) {
     char why[512], hex[65], *sigText = NULL;
     uint8_t sig[64], key[32];
     size_t size = 0;
@@ -758,47 +780,47 @@ static int SDLCALL download_thread(void *arg) {
     fprintf(stderr, "bt3: update: downloading %s\n", zip.url);
     if (!http_get(sigAsset.url, 0, NULL, &sigText, NULL, SIG_MAX) || !Upd_HexBytes(js_ws(sigText), sig, 64)) {
         SDL_free(sigText);
-        fail("The release's signature (" ASSET ".sig) could not be downloaded or read. Try again later.");
+        download_error("The release's signature (" ASSET ".sig) could not be downloaded or read. Try again later.");
         return 0;
     }
     SDL_free(sigText);
     sU.got = 0;
     if (!http_get(zip.url, 0, sU.part, NULL, NULL, 0)) {
         SDL_RemovePath(sU.part);
-        fail("The download failed (no connection, or it was cut off). Try again later.");
+        download_error("The download failed (no connection, or it was cut off). Try again later.");
         return 0;
     }
     SDL_SetAtomicInt(&sU.state, UPD_VERIFYING);
     if (!SDL_GetPathInfo(sU.part, &info) || (long long)info.size != zip.size) {
         SDL_snprintf(why, sizeof(why), "The download is incomplete (%lld of %lld bytes). Try again later.", (long long)info.size, zip.size);
         SDL_RemovePath(sU.part);
-        fail(why);
+        download_error(why);
         return 0;
     }
     data = SDL_LoadFile(sU.part, &size);
     if (data == NULL) {
         SDL_RemovePath(sU.part);
-        fail("The downloaded archive could not be read back.");
+        download_error("The downloaded archive could not be read back.");
         return 0;
     }
     UpdSha256_Hex(data, size, hex);
     if (zip.sha[0] != '\0' && SDL_strcasecmp(hex, zip.sha) != 0) {
         SDL_free(data);
         SDL_RemovePath(sU.part);
-        fail("The download is damaged: its SHA-256 is not the one GitHub lists for it. Try again later.");
+        download_error("The download is damaged: its SHA-256 is not the one GitHub lists for it. Try again later.");
         return 0;
     }
     if (!key_set(key) || !UpdCrypto_Check(sig, key, (const uint8_t *)data, size)) {
         SDL_free(data);
         SDL_RemovePath(sU.part);
-        fail("The archive's signature is NOT valid: it was not signed with this game's release key, so nothing was "
+        download_error("The archive's signature is NOT valid: it was not signed with this game's release key, so nothing was "
              "installed. Download the release from its page only if you trust where it comes from.");
         return 0;
     }
     SDL_free(data);
     if (!SDL_RenamePath(sU.part, sU.file)) {
         SDL_RemovePath(sU.part);
-        fail("The downloaded archive could not be kept in the update folder.");
+        download_error("The downloaded archive could not be kept in the update folder.");
         return 0;
     }
     lock();
@@ -806,6 +828,26 @@ static int SDLCALL download_thread(void *arg) {
     unlock();
     fprintf(stderr, "bt3: update: %s downloaded and verified (signature good, sha256 %s)\n", ASSET, hex);
     SDL_SetAtomicInt(&sU.state, UPD_READY);
+    return 1;
+}
+
+static int SDLCALL download_thread(void *arg) {
+    char why[512];
+    int attempt;
+    for (attempt = 0; attempt < 3; attempt++) {
+        SDL_SetAtomicInt(&sU.state, UPD_DOWNLOADING);
+        if (download_once(arg)) {
+            lock();
+            sU.why[0] = '\0';
+            unlock();
+            return 0;
+        }
+        fprintf(stderr, "bt3: update: download/check attempt %d of 3 failed\n", attempt + 1);
+    }
+    lock();
+    SDL_strlcpy(why, sU.why, sizeof(why));
+    unlock();
+    fail(why);
     return 0;
 }
 
@@ -816,6 +858,7 @@ void Update_Download(void) {
         return;
     }
     folders();
+    sU.installRetries = 0;
     SDL_SetAtomicInt(&sU.state, UPD_DOWNLOADING);
     t = SDL_CreateThread(download_thread, "bt3-update-get", NULL);
     if (t == NULL) {
@@ -827,7 +870,7 @@ void Update_Download(void) {
 
 void Update_Status(UpdateStatus *out) {
     memset(out, 0, sizeof(*out));
-    out->current = PORT_VERSION;
+    out->current = BT3_LOCAL_VERSION;
     out->state = SDL_GetAtomicInt(&sU.state);
     if (out->state < UPD_AVAILABLE) {
         return;
@@ -880,10 +923,13 @@ static int user_file(const char *rel) {
         "update/",      /* the update's own folder */
         "bars/",        /* bars/faces.txt: the player's own faces of the fight panels */
         "net_session/", /* what an online session leaves for the next start */
+        "wii_profiles/", /* private edition: personal bindings and shared profiles */
         "screenshots/", "replays/", "shots/",
     };
     static const char *const files[] = {
         "bt3_settings.txt", "bt3_pipelines.txt", "online_name.txt", "zdump.bin", "a11y_log.txt", "a11y_untranslated.txt",
+        "bt3_wii_controls.ini", "bt3_online_servers.ini", "bt3_server_directory.ini", "bt3_directory_admin.ini",
+        "bt3_gateway.json", "bt3_server.crt", "bt3-launcher.log",
         "prism.dll", "libprism.so", /* the screen reader's library, placed there by the player */
     };
     static const char *const own[] = {"textures/", "songs/", "stages/"}; /* packs, added songs and stages */
@@ -980,6 +1026,7 @@ static char *fonts_merge(const char *fresh, size_t freshSize, const char *mine, 
 typedef struct {
     char rel[512];
     unsigned index, mode;
+    char sha[65]; /* bytes expected after writing, including a merged fonts.tsv */
     int existed, staged, swapped;
 } Item;
 
@@ -1056,12 +1103,23 @@ static void undo(Item *items, int count, char (*made)[512], int madeCount) {
     }
 }
 
+/* Disk read-back failed: undo first, then obtain a fresh verified archive.
+   Limit repeated install repairs as well as each download's own retry count. */
+static void install_redownload(const char *why) {
+    if (sU.installRetries++ < 2) {
+        fprintf(stderr, "bt3: update: %s; downloading again\n", why);
+        download_thread(NULL);
+    } else {
+        fail(why);
+    }
+}
+
 static int SDLCALL install_thread(void *arg) {
     enum { MAX_ITEMS = 4096, MAX_DIRS = 256 };
     static Item items[MAX_ITEMS];
     static char made[MAX_DIRS][512];
     char path[1600], other[1600], why[700] = "", hex[65];
-    int count = 0, madeCount = 0, kept = 0, haveGame = 0, failAt = -1, i, n;
+    int count = 0, madeCount = 0, kept = 0, haveGame = 0, failAt = -1, checksumError = 0, i, n;
     size_t zipSize = 0;
     void *zipData;
     mz_zip_archive zip;
@@ -1078,7 +1136,7 @@ static int SDLCALL install_thread(void *arg) {
     memset(&zip, 0, sizeof(zip));
     if (zipData == NULL || SDL_strcasecmp(hex, sU.sha) != 0 || !mz_zip_reader_init_mem(&zip, zipData, zipSize, 0)) {
         SDL_free(zipData);
-        fail("The downloaded archive could not be read again, or it changed since it was checked. Nothing was changed.");
+        install_redownload("The downloaded archive could not be read again, or it changed since it was checked. Nothing was changed.");
         return 0;
     }
     /* the plan: what the zip has, where it goes */
@@ -1170,8 +1228,12 @@ static int SDLCALL install_thread(void *arg) {
         }
         path_of(other, sizeof(other), it->rel, ".new");
         it->staged = 1;
+        UpdSha256_Hex(merged != NULL ? merged : data, merged != NULL ? mergedSize : size, it->sha);
         if (!write_file(other, merged != NULL ? merged : data, merged != NULL ? mergedSize : size, it->mode)) {
             SDL_snprintf(why, sizeof(why), "%s could not be written (%s).", other, SDL_GetError());
+        } else if (!UpdSha256_File(other, hex) || SDL_strcasecmp(hex, it->sha) != 0) {
+            SDL_snprintf(why, sizeof(why), "The staged file failed SHA-256 verification: %s.", it->rel);
+            checksumError = 1;
         }
         SDL_free(merged);
         mz_free(data);
@@ -1201,9 +1263,17 @@ static int SDLCALL install_thread(void *arg) {
             break;
         }
         it->staged = 0;
+        if (!UpdSha256_File(path, hex) || SDL_strcasecmp(hex, it->sha) != 0) {
+            SDL_snprintf(why, sizeof(why), "The installed file failed SHA-256 verification: %s.", it->rel);
+            checksumError = 1;
+        }
     }
     if (why[0] != '\0') {
         undo(items, count, made, madeCount);
+        if (checksumError) {
+            install_redownload(why);
+            return 0;
+        }
         fprintf(stderr, "bt3: update: install failed, everything put back: %s\n", why);
         SDL_strlcat(why, " Everything was put back: this version goes on as it was.", sizeof(why));
         fail(why);
@@ -1256,7 +1326,7 @@ int Update_Relaunch(void) {
     if (SDL_GetAtomicInt(&sU.state) != UPD_INSTALLED) {
         return 0;
     }
-    SDL_snprintf(exe, sizeof(exe), "%s" GAME_EXE, sU.root);
+    SDL_snprintf(exe, sizeof(exe), "%s启动游戏.exe", sU.root);
     args[0] = exe;
     args[1] = NULL;
     props = SDL_CreateProperties();

@@ -2033,6 +2033,7 @@ static struct { const uint8_t *p; size_t n; } *sArtFile;
 static MlArt *sArt;
 static uint64_t *sArtMid;                        /* the art's middle-row hashes, in order */
 static int sArtCount, sArtMidCount, sArtReady;
+static int sArtLocalMenus;
 static uint8_t sArtSize[10][10];                 /* the sizes (as powers of two) any of them has */
 static pthread_mutex_t sArtLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -2126,6 +2127,7 @@ static int ml_art_pair(MlBuf usa, MlBuf eu, uint32_t file, int itemSheets, MlArt
             continue;
         }
         n += itemSheets && out[n].w == SHEET_W && out[n].h == 128 ? 2 : 1;
+        if (sArtLocalMenus) { continue; } /* The curated bank uses each texture's own palette. */
         for (j = 0; j < count && n + 1 < room; j++) {
             if (j != i && ml_art_one(usa, eu, file, i, j, out + n) > 0) {
                 n += itemSheets && out[n].w == SHEET_W && out[n].h == 128 ? 2 : 1;
@@ -2337,13 +2339,14 @@ int MenuLabels_Art(const char *dataDir, int bank, char *why, size_t whyLen) {
 
     memset(&b, 0, sizeof(b));
     snprintf(why, whyLen, "out of memory");
-    if (c == NULL || bank < 1 || bank > 4) {
+    if (c == NULL || bank < 1 || bank > 5) {
         goto done;
     }
     if (ml_read_disc(c, dataDir, 0) != MENU_LABELS_MADE) {
         snprintf(why, whyLen, "%s", c->why);
         goto done;
     }
+    sArtLocalMenus = bank == 5;
     for (f = 0; f < ML_FILES; f++) { /* each USA archive beside the same archive of the language's bank */
         int number = kMlFiles[f].number, entry = number == 5 ? 5 + bank : 451 + (number - 448) + bank * 31;
         char path[1300];
@@ -2352,7 +2355,12 @@ int MenuLabels_Art(const char *dataDir, int bank, char *why, size_t whyLen) {
         uint8_t *eu = NULL;
         MlBuf usa = c->file[f], euBuf;
         uint32_t count, m, at[6];
-        snprintf(path, sizeof(path), "%s/pzs3eu1/%05d.bin", dataDir, entry);
+        if (bank == 5) {
+            if (number == 5) { continue; } /* Local Chinese menus; keep battle artwork. */
+            snprintf(path, sizeof(path), "%s/game-text/art/zh-CN/%05d.bin", dataDir, number);
+        } else {
+            snprintf(path, sizeof(path), "%s/pzs3eu1/%05d.bin", dataDir, entry);
+        }
         if ((fp = fopen(path, "rb")) == NULL || fseek(fp, 0, SEEK_END) != 0 || (size = ftell(fp)) < 12 || size > 64L * 1024 * 1024 ||
             fseek(fp, 0, SEEK_SET) != 0 || (eu = malloc((size_t)size)) == NULL || fread(eu, 1, (size_t)size, fp) != (size_t)size) {
             if (fp != NULL) {

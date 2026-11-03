@@ -1,0 +1,18 @@
+{
+  "name": "好友联机大厅",
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "trust_local_proxy": true,
+  "database": "data/lobby.sqlite3",
+  "access_key": "CHANGE_TO_A_RANDOM_FRIENDS_ACCESS_KEY",
+  "turn": {
+    "required": true,
+    "server": "PUBLIC_IPV4:3478",
+    "secret": "CHANGE_TO_THE_SAME_COTURN_SHARED_SECRET"
+  },
+  "rooms": [
+    {"id": "friends-01", "name": "好友房 01 · 单人", "rules": {"battle": 0, "time": 4}},
+    {"id": "friends-02", "name": "好友房 02 · 组队", "rules": {"battle": 1, "time": 4}},
+    {"id": "friends-03", "name": "好友房 03 · 15 DP", "rules": {"battle": 3, "time": 3}}
+  ]
+}

@@ -55,6 +55,10 @@ void MenuText_SetSharedFontId(int id);
 void MenuText_RegisterGlyphs(int tbp, int cbp, const void *glyphs, int count, int lineHeight);
 uint8_t *MenuText_RenderGlyphs(const uint8_t *rgba, int width, int height, int tbp, int cbp,
                              int scale, int *outWidth, int *outHeight);
+/* Renderer-only atlas identity, after exact source-cell verification; zero means no cached atlas. */
+uint64_t MenuText_GlyphAtlasId(const uint8_t *rgba, int width, int height, int tbp, int cbp, int scale);
+/* Warm at most one main-menu row or approved source plane between menu frames. No game variables change. */
+void MenuText_WarmGlyphs(int scale);
 /* Packed glyph x/y/width/height, top/bottom padding, atlas width/height, in logical pixels. */
 int MenuText_MapGlyph(int tbp, int cbp, int width, int height,
                      float u0, float v0, float u1, float v1, float *rect);

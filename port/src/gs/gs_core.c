@@ -1,3 +1,4 @@
+#include "perf_trace.h"
 /*
  * Graphics Synthesizer, reference implementation in software.
  *
@@ -1496,7 +1497,8 @@ void Port_GsGifChannel(uint32_t addr, uint32_t qwc, int chain) {
 void Port_GsVif1Chain(uint32_t tadr, int tte) {
     static uint64_t next, start, sum, worst, sumGame, sumList, sumTex, sumPipe, sumEnd, perMin = ~0ull, perMax;
     static unsigned n, over;
-    uint64_t t, tChain;
+    uint64_t t, tChain, traceValues[PERF_TRACE_VALUES] = {0};
+    int tracing = PerfTrace_Enabled();
 
     if (!gs_on()) {
         return;
@@ -1519,6 +1521,12 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
         extern unsigned long long gPortSleptNs;
         uint64_t waited = (uint64_t)gPortSleptNs;
         uint64_t work = t - start > waited ? t - start - waited : 0; /* without the waiting for the vertical blank */
+        if (tracing) {
+            traceValues[0] = start; traceValues[1] = tChain; traceValues[2] = t;
+            traceValues[3] = t - start; traceValues[4] = waited;
+            traceValues[5] = tChain - start; traceValues[6] = t - tChain;
+            traceValues[7] = work;
+        }
         gPortSleptNs = 0;
         {   /* a frame over budget: where the time went and what was created in it (in an online match a frame of
                100 ms or more always, without BT3_GS_VERBOSE: the other player's copy waits for this one meanwhile;
@@ -1586,6 +1594,15 @@ void Port_GsVif1Chain(uint32_t tadr, int tte) {
         sFrozenUsed = 0;
         walk_chain(tadr, tte, freeze_block);
         render_post(2, tadr, tte);
+    }
+    if (tracing && traceValues[0] != 0) {
+        extern int gPortMenuMode;
+        extern unsigned gPortVBlanks, gPortLiveBlanks;
+        traceValues[8] = now_ns() - start;
+        traceValues[9] = gPortMenuMode != 0;
+        traceValues[10] = gPortVBlanks; traceValues[11] = gPortLiveBlanks;
+        traceValues[12] = sThreaded != 0;
+        PerfTrace_Write(PERF_TRACE_GAME, sFrame, traceValues);
     }
 }
 

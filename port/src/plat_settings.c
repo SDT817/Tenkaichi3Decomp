@@ -10,17 +10,19 @@
  * deadzone_p1_ls / deadzone_p1_rs = a stick's deadzone, vibration_p1 and vibration_p1_strength).
  */
 #include <pthread.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_SETTINGS 200
-static struct { char name[24]; int value; } sSet[MAX_SETTINGS];
+static struct Setting { char name[24]; int value; } *sSet;
+static int sCapacity;
 /* The few settings that are text (online name, menu language): `name="text"` in the file, after the numbers. A
    release from before these reads past such a line. */
-#define MAX_TEXTS 8
-static struct { char name[24]; char value[64]; } sText[MAX_TEXTS];
-static int sTextCount;
+static struct TextSetting { char name[24]; char value[64]; } *sText;
+static int sTextCount, sTextCapacity;
+static int sLoadFailed;
 static int sDirty;
 static int sCount;
 static pthread_once_t sOnce = PTHREAD_ONCE_INIT;
@@ -31,19 +33,39 @@ static const char *path(void) {
     return p == NULL ? "bt3_settings.txt" : p[0] == '\0' ? NULL : p;
 }
 
+/* Old binding files can contain many more entries than the current UI uses. Grow
+   both tables on demand; a numeric table must not stop the trailing text reads. */
+static void *reserve(void *items, size_t width, int used, int *capacity) {
+    void *p;
+    int n;
+
+    if (used < *capacity) return items;
+    if (*capacity > INT_MAX / 2) return NULL;
+    n = *capacity != 0 ? *capacity * 2 : 32;
+    if ((size_t)n > SIZE_MAX / width) return NULL;
+    p = realloc(items, (size_t)n * width);
+    if (p != NULL) *capacity = n;
+    else fprintf(stderr, "bt3: could not allocate settings table\n");
+    return p;
+}
+
 static void load(void) {
     char line[128], name[24];
     int value;
     FILE *fp = path() != NULL ? fopen(path(), "r") : NULL;
 
-    while (fp != NULL && fgets(line, sizeof(line), fp) != NULL && sCount < MAX_SETTINGS) {
+    while (fp != NULL && fgets(line, sizeof(line), fp) != NULL) {
         char text[64];
         if (sscanf(line, " %23[a-z0-9_]=\"%63[^\"\n]", name, text) == 2) {
-            if (sTextCount < MAX_TEXTS) {
-                strcpy(sText[sTextCount].name, name);
-                strcpy(sText[sTextCount++].value, text);
-            }
+            struct TextSetting *p = reserve(sText, sizeof(*sText), sTextCount, &sTextCapacity);
+            if (p == NULL) { sLoadFailed = 1; break; }
+            sText = p;
+            strcpy(sText[sTextCount].name, name);
+            strcpy(sText[sTextCount++].value, text);
         } else if (sscanf(line, " %23[a-z0-9_]=%d", name, &value) == 2) {
+            struct Setting *p = reserve(sSet, sizeof(*sSet), sCount, &sCapacity);
+            if (p == NULL) { sLoadFailed = 1; break; }
+            sSet = p;
             strcpy(sSet[sCount].name, name);
             sSet[sCount++].value = value;
         }
@@ -76,15 +98,17 @@ void Port_SettingSave(const char *name, int value) {
     pthread_mutex_lock(&sLock);
     for (i = 0; i < sCount && strcmp(sSet[i].name, name) != 0; i++) {
     }
-    if (i < MAX_SETTINGS) {
-        if (i == sCount) {
-            snprintf(sSet[sCount++].name, sizeof(sSet[0].name), "%s", name);
-            sDirty = 1;
-        }
-        if (sSet[i].value != value) {
-            sSet[i].value = value;
-            sDirty = 1;
-        }
+    if (i == sCount) {
+        struct Setting *p = reserve(sSet, sizeof(*sSet), sCount, &sCapacity);
+        if (p == NULL) { pthread_mutex_unlock(&sLock); return; }
+        sSet = p;
+        snprintf(sSet[sCount].name, sizeof(sSet[0].name), "%s", name);
+        sSet[sCount++].value = 0;
+        sDirty = 1;
+    }
+    if (sSet[i].value != value) {
+        sSet[i].value = value;
+        sDirty = 1;
     }
     pthread_mutex_unlock(&sLock);
 }
@@ -117,17 +141,18 @@ void Port_SettingTextSave(const char *name, const char *value) {
     pthread_mutex_lock(&sLock);
     for (i = 0; i < sTextCount && strcmp(sText[i].name, name) != 0; i++) {
     }
-    if (i < MAX_TEXTS) {
-        if (i == sTextCount) {
-            snprintf(sText[i].name, sizeof(sText[i].name), "%s", name);
-            sText[i].value[0] = '\0';
-            sTextCount++;
-            sDirty = 1;
-        }
-        if (strcmp(sText[i].value, clean) != 0) {
-            strcpy(sText[i].value, clean);
-            sDirty = 1;
-        }
+    if (i == sTextCount) {
+        struct TextSetting *p = reserve(sText, sizeof(*sText), sTextCount, &sTextCapacity);
+        if (p == NULL) { pthread_mutex_unlock(&sLock); return; }
+        sText = p;
+        snprintf(sText[i].name, sizeof(sText[i].name), "%s", name);
+        sText[i].value[0] = '\0';
+        sTextCount++;
+        sDirty = 1;
+    }
+    if (strcmp(sText[i].value, clean) != 0) {
+        strcpy(sText[i].value, clean);
+        sDirty = 1;
     }
     pthread_mutex_unlock(&sLock);
 }
@@ -137,7 +162,7 @@ void Port_SettingsWrite(void) {
     int i;
 
     pthread_mutex_lock(&sLock);
-    fp = sDirty && path() != NULL ? fopen(path(), "w") : NULL;
+    fp = sDirty && !sLoadFailed && path() != NULL ? fopen(path(), "w") : NULL;
     if (fp != NULL) {
         for (i = 0; i < sCount; i++) {
             fprintf(fp, "%s=%d\n", sSet[i].name, sSet[i].value);

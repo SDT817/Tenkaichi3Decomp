@@ -1,0 +1,24 @@
+# Place limit_req_zone in nginx's http context (e.g. sites-enabled include).
+limit_req_zone $binary_remote_addr zone=bt3_lobby:10m rate=20r/s;
+
+server {
+    listen 443 ssl;
+    server_name YOUR_DOMAIN;
+    ssl_certificate /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    client_max_body_size 8k;
+    client_body_timeout 15s;
+
+    location ~ ^/(lobby/v1/request|v1/(host|join|poll|addrs|leave|relay)|healthz)$ {
+        limit_req zone=bt3_lobby burst=40 nodelay;
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host $host;
+        # Always overwrite: the service trusts this header only from loopback.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        access_log off;
+    }
+    location / { return 404; }
+}

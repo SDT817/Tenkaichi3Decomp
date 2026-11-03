@@ -1,0 +1,14 @@
+{
+  "name": "本机演示大厅",
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "database": "data/demo.sqlite3",
+  "access_key": "",
+  "ping": {"listen": "127.0.0.1", "host": "127.0.0.1", "port": 8787},
+  "turn": {"required": false},
+  "rooms": [
+    {"id": "friends-01", "name": "好友房 01 · 单人", "rules": {"battle": 0, "time": 4}},
+    {"id": "friends-02", "name": "好友房 02 · 组队", "rules": {"battle": 1, "time": 4}},
+    {"id": "friends-03", "name": "好友房 03 · 15 DP", "rules": {"battle": 3, "time": 3}}
+  ]
+}

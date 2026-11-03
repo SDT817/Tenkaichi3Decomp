@@ -260,6 +260,14 @@ void View_InitLayout(View *view, s32 layout) {
         default:
             return;
     }
+#ifdef PORT
+    /* Match the HUD's local order. Only projection/scissor positions change;
+       the cameras' identities, poses and input sides retain their original order. */
+    if (split) {
+        extern int Port_OnlineSplitSwap(void);
+        left ^= Port_OnlineSplitSwap();
+    }
+#endif
     if (split == 0) {
         Vec4_Set(&size, 2047.0f, 2047.0f, 0.1f, 16777215.0f);
         View_SetProjection(view, &size, 433.0f, 1.0f, view->aspect, 2048.0f, 2048.0f, 1.0f, 10877000.0f, 0.3f,

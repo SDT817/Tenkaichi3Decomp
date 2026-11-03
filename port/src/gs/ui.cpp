@@ -1,3 +1,4 @@
+#include "ui_zh.h"
 // The settings window of the PC build: Dear ImGui over the finished picture. F1 opens and closes it, or START + SELECT
 // of a controller, or the key and button of its Controls list (gs_input.c: PortInput_Hotkey).
 // Everything it shows lives elsewhere (ui.h): the renderer's settings in gs_gpu.c, the bindings in gs_input.c.
@@ -12,12 +13,16 @@
 #include "imgui_impl_sdlgpu3.h"
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
+#include "control_bindings.h"
+#include "control_profiles.h"
+#include <algorithm>
 #include "namefont.h"
 #include "../port_release.h"
 #include "menu_text.h"
 #include "menu_translation.h"
 #include "../quit_dialog.h"
 #include "net_chat.h"
+#include "online_lobby.h"
 #include "net_lobby.h"
 #include "net_update.h"
 
@@ -48,6 +53,7 @@ void Port_Menus43Set(int on);
 int Port_HudLayout(void);                      // gs_draw.c: 2 = the HUD is about the middle of the screen
 int GsDraw_HudShown(void);                     // ... and 1 while the game is drawing the HUD's side panels
 const char *Port_NetName(int player);          // the name of the player of side 0 or 1 ("" outside a match)
+int Port_TitleNoticeVisible(void);
 int Port_HudSwap(void);                        // the two sides of the HUD are in each other's places on this copy
 int Port_NetActive(void);
 int Port_NetMe(void);                          // gs/net.c: this copy's side, 0 or 1
@@ -117,6 +123,7 @@ static bool sQuit;                             // the question before the game c
 static bool sQuitNo;                           // ... and Esc answered it: no
 static bool sPadHold;                          // the controller does not work the window: a binding is waited for, or its button is still down
 static int sTab;                               // the settings tab that is open (the shoulder buttons go to its neighbours)
+static int sControlPlayer;
 static bool sPadTab;                           // the shoulder buttons changed the tab this frame
 static SDL_GPUDevice *sDevice;
 // The online chat (net_chat.c): its key opens a line to type, Enter sends it, Esc puts it away.
@@ -244,7 +251,7 @@ static SDL_GPUTexture *load_strip(const char *env, const char *rel, uint32_t *w,
 }
 
 // ---- the side bars ----
-// Where the picture is narrower than the window (a 4:3 picture, or "Menus in 4:3", in a wide window) the sides are
+// Where the picture is narrower than the window (a 4:3 picture, or "菜单使用 4:3 比例", in a wide window) the sides are
 // black, or with "Side bars: Border" a panel with a border along the picture. Two pictures: the border (trim.png),
 // kept in proportion at the picture's edge and as high as the picture, and the plain panel (fill.png), stretched
 // over the rest, so a bar of any width looks right. Both are drawn as they are on the left and mirrored on the right.
@@ -297,7 +304,9 @@ static bool bars_on(void) {
 }
 
 // For the fight panels (fight_panels_ui.cpp): textures of their own and the display faces.
-static ImFont *sFontBold;
+static ImFont *sFontBold, *sTitleFont;
+static bool sMeterHover, sMeterDrag;
+static bool meter_on(void);
 SDL_GPUTexture *Ui_Texture(uint8_t *pix, uint32_t w, uint32_t h) {
     return make_strip(pix, (size_t)w * h * 4, w, h, 1);
 }
@@ -314,8 +323,8 @@ void Ui_TextureFree(SDL_GPUTexture *tex) {
 ImFont *Ui_FontBold(void) { return sFontBold; }
 bool FightPanels_Draw(ImDrawList *dl, float lx, float rx, float y0, float y1, float bar, float trim);
 
-// The fight panels' two faces ("Name font", "Form font" in the settings): fonts of the game's own list (fonts.tsv,
-// as the Menu font and the Dialogue / UI font), checked as those are (menu_text.c) and saved by their id; "Default"
+// The fight panels' two faces ("姓名字体", "形态字体" in the settings): fonts of the game's own list (fonts.tsv,
+// as the Menu font and the Dialogue / UI font), checked as those are (menu_text.c) and saved by their id; "默认"
 // is the first of the list that can be used. A choice is loaded into the font atlas between two frames (fonts_apply).
 struct PanelFont {
     const char *setting;
@@ -363,8 +372,8 @@ static void fonts_apply(void) {
 
 // A combo of the game's fonts; the choice is loaded before the next frame.
 static void font_picker(const char *label, PanelFont &pf, const char *tip) {
-    if (ImGui::BeginCombo(label, pf.choice > 0 ? MenuText_FontName(pf.choice) : "Default")) {
-        if (ImGui::Selectable("Default", pf.choice == 0)) {
+    if (ImGui::BeginCombo(label, pf.choice > 0 ? MenuText_FontName(pf.choice) : "默认")) {
+        if (ImGui::Selectable("默认", pf.choice == 0)) {
             pf.pending = 0;
         }
         for (int i = 1; i < MenuText_FontCount(); i++) {
@@ -528,13 +537,15 @@ static void language_choose(int choice) {
 
 int Ui_Init(SDL_Window *window, SDL_GPUDevice *device, void *gl_context, const char *gpu_name) {
     static const char *fonts[] = { // a proportional system font if there is one; else the library's built-in font
+        "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", "C:\\Windows\\Fonts\\segoeui.ttf",
     };
     ImGui_ImplSDLGPU3_InitInfo info;
 
-    snprintf(sGpuName, sizeof(sGpuName), "%s", gpu_name && gpu_name[0] ? gpu_name : "Unavailable");
+    snprintf(sGpuName, sizeof(sGpuName), "%s", gpu_name && gpu_name[0] ? gpu_name : "不可用");
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -556,6 +567,11 @@ int Ui_Init(SDL_Window *window, SDL_GPUDevice *device, void *gl_context, const c
             io.Fonts->AddFontDefault(); // (the window's font stays the first)
         }
         sFontBold = panel_font_load(0);
+        {
+            char path[1400];
+            snprintf(path, sizeof(path), "%sfonts/bt3cn-rounded-bold.ttf", SDL_GetBasePath());
+            sTitleFont = io.Fonts->AddFontFromFileTTF(path, 48.0f);
+        }
         for (PanelFont &pf : sPanelFont) {
             pf.choice = MenuText_FontChoice(Port_Setting(pf.setting, 0));
             pf.font = panel_font_load(pf.choice);
@@ -593,6 +609,7 @@ int Ui_Init(SDL_Window *window, SDL_GPUDevice *device, void *gl_context, const c
             sQuit = true;
             PortQuit_Request();
         }
+        if (sForceTab == 10) { sForceTab = 8; } // testing: About (8 and 9 retain their earlier meanings)
         sOpen = !sQuit;
         gPortOverlayOpen = 1;
     }
@@ -610,6 +627,8 @@ static void input_owner(void) {
 }
 
 static void set_open(bool open) {
+    WiiProfiles::Cancel();
+    PortWii_Cancel();
     if (open && sChat) {
         chat_close();
     }
@@ -626,9 +645,19 @@ static void capture(int kind, int player, int action) {
     sPadHold = true;
 }
 
+// The Controls page uses keyboard/mouse navigation while physical pad input stays
+// available to the binding editor and live tests. Restore navigation on other pages.
+static void gamepad_navigation(void) {
+    if (sPadHold || (sChat && !sOpen) || (sOpen && !sNet && (sTab == 4 || sForceTab == 4))) {
+        ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    } else {
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    }
+}
+
 // A controller button pressed in the window (not while it waits for a binding, a list is open or a field is edited).
 static bool pad_pressed(ImGuiKey key) {
-    return sCapKind == 0 && !sPadHold && !sQuit && !ImGui::IsAnyItemActive() &&
+    return !(sOpen && !sNet && (sTab == 4 || sForceTab == 4)) && sCapKind == 0 && !sPadHold && !sQuit && !ImGui::IsAnyItemActive() &&
            !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) && ImGui::IsKeyPressed(key, false);
 }
 
@@ -646,7 +675,7 @@ int Ui_QuitAsk(void) {
     PortQuit_Request();
     input_owner();
     const char *translated = MenuTranslation_PortText(PORT_TEXT_QUIT_CONFIRM);
-    PortA11y_Say(translated ? translated : PortA11y_Label("Close the game? Progress that was not saved is lost."), 1);
+    PortA11y_Say(translated ? translated : PortA11y_Label("要退出游戏吗？未保存的进度将丢失。"), 1);
     say_quit_button(1, 0);
     PortA11y_Say(PortA11y_Label("Left and right choose, Enter confirms, Escape goes back to the game"), 0);
     return 1;
@@ -657,7 +686,7 @@ int Ui_QuitAsk(void) {
 static void say_quit_button(int which, int flags) {
     char text[128], pos[32];
     snprintf(pos, sizeof(pos), PortA11y_Label(", %d of %d"), which + 1, 2);
-    snprintf(text, sizeof(text), "%s%s", PortA11y_Label(which == 0 ? "Exit" : "Cancel"), pos);
+    snprintf(text, sizeof(text), "%s%s", PortA11y_Label(which == 0 ? "退出" : "取消"), pos);
     PortA11y_Say(text, flags);
 }
 
@@ -668,11 +697,11 @@ static void build_quit(void) {
     int focus = -1;
 
     sQuitNo = false;
-    if (!ImGui::IsPopupOpen("Exit game")) {
-        ImGui::OpenPopup("Exit game");
+    if (!ImGui::IsPopupOpen("退出游戏")) {
+        ImGui::OpenPopup("退出游戏");
     }
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Exit game", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::BeginPopupModal("退出游戏", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
         const char *translated = MenuTranslation_PortText(PORT_TEXT_QUIT_CONFIRM);
         const char *kAsk = translated ? translated : "Close the game?\nUnsaved progress will be lost.";
         // the two buttons under the middle of the question (the window is as wide as its text)
@@ -682,18 +711,18 @@ static void build_quit(void) {
         if (line > pair) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (line - pair) * 0.5f);
         }
-        if (ImGui::Button("Exit", ImVec2(U(140.0f), 0.0f))) {
+        if (ImGui::Button("退出", ImVec2(U(140.0f), 0.0f))) {
             exit(0);
         }
         focus = ImGui::IsItemFocused() ? 0 : focus;
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(U(140.0f), 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+        if (ImGui::Button("取消", ImVec2(U(140.0f), 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
             stay = true;
         }
         focus = ImGui::IsItemFocused() ? 1 : focus;
         if (ImGui::IsWindowAppearing()) {
             ImGui::SetItemDefaultFocus(); // (on Cancel: a second press of the same button does not close the game)
-            PortA11y_Say(translated ? translated : PortA11y_Label("Close the game? Progress that was not saved is lost."), 1);
+            PortA11y_Say(translated ? translated : PortA11y_Label("要退出游戏吗？未保存的进度将丢失。"), 1);
             say_quit_button(1, 0);
             PortA11y_Say(PortA11y_Label("Left and right choose, Enter confirms, Escape goes back to the game"), 0);
             said = 1;
@@ -734,6 +763,7 @@ static void net_open(void) {
 }
 
 // Quick match (the third tab of the online screen): what stands under the queues.
+static bool sServerTab = true; // persistent private servers
 static bool sNetBusy;   // the lobby is waiting or connecting
 static int sQueue = -1; // the queue chosen: 0 single, 1 team, 2..4 DP battle of 10 / 15 / 20 DP
 
@@ -748,39 +778,39 @@ static void quick_status(int state, int &lastState, const char *name) {
         state = 0;
     }
     if (state == 3 || state == 1) {
-        ImGui::TextUnformatted(Port_LobbyCheckingData() ? "Checking your game data... The search begins when it is done."
-                               : state == 1 ? "Found a player. Connecting..." : "Searching for a player in this queue...");
+        ImGui::TextUnformatted(Port_LobbyCheckingData() ? "正在检查游戏数据，完成后开始搜索…"
+                               : state == 1 ? "已找到玩家，正在连接…" : "正在此队列中搜索玩家…");
         if (state == 3 && since != 0 && !Port_LobbyCheckingData()) {
             Uint64 left = kSearchMs - (SDL_GetTicks() - since);
-            ImGui::TextDisabled("Searching for %d:%02d more. Leave the window open.", (int)(left / 60000), (int)(left / 1000 % 60));
+            ImGui::TextDisabled("还将搜索 %d:%02d，请保持窗口开启。", (int)(left / 60000), (int)(left / 1000 % 60));
         }
-        if (ImGui::Button("Cancel", ImVec2(U(120.0f), 0.0f))) {
+        if (ImGui::Button("取消", ImVec2(U(120.0f), 0.0f))) {
             Port_LobbyCancel();
             lastState = 0;
         }
         return;
     }
     if (lastState == -3) {
-        ImGui::TextWrapped("%s", Port_LobbyError());
+        ImGui::TextWrapped("%s", UiZh(Port_LobbyError()));
     } else if (lastState == -4) {
-        ImGui::TextWrapped("The two games could not reach each other, directly or through the relay. Search again for another player.");
+        ImGui::TextWrapped("直连和中继均未能连接双方，请重新搜索其他玩家。");
     } else if (lastState == -2) {
-        ImGui::TextWrapped("The other player's game is a different version. Search again.");
+        ImGui::TextWrapped("对方游戏版本不同，请重新搜索。");
     } else if (lastState == -5) {
-        ImGui::TextWrapped("Nobody was searching this queue in the last three minutes. Search again, or try another queue.");
+        ImGui::TextWrapped("过去三分钟此队列中没有其他玩家。请重新搜索或更换队列。");
     }
     // Quick match is with strangers: the original disc's data only (gs/net.c refuses the search otherwise; said here
     // before it is asked for). With friends, by code or address, the same data on both sides is enough.
     const char *refused = Port_LobbyQuickRefusal();
     if (refused != NULL && refused[0] != '\0' && lastState != -3) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.35f, 1.0f));
-        ImGui::TextWrapped("%s", refused);
+        ImGui::TextWrapped("%s", UiZh(refused));
         ImGui::PopStyleColor();
     } else if (refused != NULL) {
-        ImGui::TextDisabled("Checking your game data...");
+        ImGui::TextDisabled("正在检查游戏数据…");
     }
     ImGui::BeginDisabled(refused != NULL && refused[0] != '\0');
-    bool search = ImGui::Button(lastState == -5 ? "Search again" : "Search for a match", ImVec2(U(200.0f), 0.0f));
+    bool search = ImGui::Button(lastState == -5 ? "重新搜索" : "搜索对手", ImVec2(U(200.0f), 0.0f));
     ImGui::EndDisabled();
     if (search) {
         since = SDL_GetTicks() + 1;
@@ -801,7 +831,7 @@ static void quick_status(int state, int &lastState, const char *name) {
 
 static void build_net(void) {
     static char name[17] = "Player", address[64] = "", port[8] = "7000";
-    static int tab, roll = -1, delay = 1, battle = -1, timeLimit = 3, speed = -1;
+    static int tab = 3, roll = -1, delay = 1, battle = -1, timeLimit = 3, speed = -1;
     static bool useCode = true;       // a lobby with a code (no port forwarding) or on a port
     static char roomCode[8] = "";     // the code to join with
     static int lastState = 0;         // what the search said last (for its messages after a failure)
@@ -809,33 +839,32 @@ static void build_net(void) {
     bool open = true;
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(U(560.0f), 0.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(std::min(U(1120.0f), io.DisplaySize.x * 0.96f), 0.0f), ImGuiCond_Appearing);
     if (pad_pressed(ImGuiKey_GamepadFaceRight)) { // Circle / B: out of the window, as its close button
         open = false;
     }
-    if (ImGui::Begin("Dragon Net Battle", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (ImGui::Begin("龙网对战", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
         {
             int min = 0, latest = 0, mine = Port_LobbyRelease(&min, &latest);
             if (min > mine) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.35f, 1.0f));
-                ImGui::TextWrapped("Update available. Online servers are unreachable until you update.");
+                ImGui::TextWrapped("有可用更新，请先更新游戏再连接联机服务器。");
                 ImGui::PopStyleColor();
-                ImGui::TextDisabled("You have 0.%d.%d; 0.%d.%d or newer is needed. github.com/z3xox/Tenkaichi3Decomp/releases", mine / 100, mine % 100, min / 100, min % 100);
+                ImGui::TextDisabled("当前版本 0.%d.%d，需要 0.%d.%d 或更新版本。github.com/z3xox/Tenkaichi3Decomp/releases", mine / 100, mine % 100, min / 100, min % 100);
                 ImGui::Separator();
             } else if (latest > mine) {
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Update available: release 0.%d.%d.", latest / 100, latest % 100);
-                ImGui::TextDisabled("F1 to update, or github.com/z3xox/Tenkaichi3Decomp/releases");
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "发现新版本：0.%d.%d。", latest / 100, latest % 100);
+                ImGui::TextDisabled("按 F1 查看更新，或访问 github.com/z3xox/Tenkaichi3Decomp/releases");
                 ImGui::Separator();
             }
             if (Port_OnlineBlocked() != NULL) { // an update is under way (gs/net_update.c): no new session starts
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.35f, 1.0f));
-                ImGui::TextWrapped("%s", Port_OnlineBlocked());
+                ImGui::TextWrapped("%s", UiZh(Port_OnlineBlocked()));
                 ImGui::PopStyleColor();
                 ImGui::Separator();
             }
         }
-        ImGui::TextWrapped("Fight players on other computers. One of you opens a lobby, the others join it with its code or "
-                           "the owner's address; its page (Tenkaichi Budokai Online) has the places, the rules and the matches.");
+        ImGui::TextWrapped("与其他电脑上的玩家对战。一人创建大厅，其他人通过房间码或房主地址加入；进入主菜单的联机模式后，可选择位置、设置规则并开始对战。");
         ImGui::Spacing();
         ImGui::SetNextItemWidth(U(260.0f));
         {
@@ -845,13 +874,22 @@ static void build_net(void) {
                 Port_SettingText("net_name", "Player", name, sizeof(name));
             }
         }
-        ImGui::InputText("Player name", name, sizeof(name));
+        ImGui::InputText("玩家名称", name, sizeof(name));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             Port_SettingTextSave("net_name", name);
             Port_SettingsWrite();
         }
         ImGui::Spacing();
+        bool focusServers = OnlineLobby::FocusTab();
         if (ImGui::BeginTabBar("net")) {
+            ImGui::BeginDisabled(sNetBusy);
+            if (ImGui::BeginTabItem("服务器大厅", NULL, focusServers ? ImGuiTabItemFlags_SetSelected : 0)) {
+                tab = 3;
+                OnlineLobby::Draw(name, U(1.0f));
+                ImGui::EndTabItem();
+            }
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(OnlineLobby::Connecting());
             // BT3_UI_NET_TAB=host|quick|join (testing, with BT3_UI_OPEN=9): the online screen opens on that tab
             static const char *firstTab = getenv("BT3_UI_NET_TAB");
             static int firstFrames = 10; // (not on the tab bar's first frame alone: it has no tabs yet then)
@@ -859,16 +897,14 @@ static void build_net(void) {
                 ImGuiTabItemFlags f = firstTab != NULL && strcmp(firstTab, which) == 0 ? ImGuiTabItemFlags_SetSelected : 0;
                 return f;
             };
-            if (ImGui::BeginTabItem("Host", NULL, tabFlags("host"))) {
-                static const char *const kRoll[] = {"Off (wait for each other)", "Up to 2 frames", "Up to 4 frames", "Up to 6 frames", "Up to 8 frames"};
+            if (ImGui::BeginTabItem("创建", NULL, tabFlags("host"))) {
+                static const char *const kRoll[] = {"关闭（等待对方）", "最多 2 帧", "最多 4 帧", "最多 6 帧", "最多 8 帧"};
                 tab = 0;
-                ImGui::Checkbox("Use a code (no port forwarding needed)", &useCode);
-                ImGui::SetItemTooltip("Your lobby gets a short code to tell the others, and the games find each other through a\n"
-                                      "small matchmaking service. Works with most home routers. Without it the lobby is on a port,\n"
-                                      "which must be reachable from the others (port forwarding or a virtual network).");
+                ImGui::Checkbox("使用房间码（无需端口转发）", &useCode);
+                ImGui::SetItemTooltip("创建一个可告知其他玩家的房间码，通过匹配服务建立连接，适用于大多数家用路由器。\n关闭后使用指定端口，其他玩家必须能够访问此端口（端口转发或虚拟局域网）。");
                 ImGui::BeginDisabled(useCode);
                 ImGui::SetNextItemWidth(U(120.0f));
-                ImGui::InputText("Port", port, sizeof(port), ImGuiInputTextFlags_CharsDecimal);
+                ImGui::InputText("端口", port, sizeof(port), ImGuiInputTextFlags_CharsDecimal);
                 ImGui::EndDisabled();
                 if (roll < 0) { // the choices of last time (new names: the first ones' defaults were 4 frames and delay 1)
                     roll = Port_RollCan() ? Port_Setting("net_rollback2", 8) / 2 : 0;
@@ -878,28 +914,28 @@ static void build_net(void) {
                 }
                 ImGui::BeginDisabled(!Port_RollCan());
                 ImGui::SetNextItemWidth(U(260.0f));
-                ImGui::Combo("Rollback", &roll, kRoll, 5);
+                ImGui::Combo("回滚", &roll, kRoll, 5);
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                    ImGui::SetTooltip("With rollback your own moves come out at once and the game corrects itself when the\n"
-                                      "other player's buttons arrive. More frames cope with a slower connection and cost\n"
-                                      "more processor time. Off: both games wait for each other every frame.");
+                    ImGui::SetTooltip("开启回滚后，本地操作立即响应，收到对方输入后再校正游戏状态。\n"
+                                      "更高的回滚帧数适合延迟较大的连接，也会消耗更多处理器资源。\n"
+                                      "关闭时，双方每帧等待彼此的输入。");
                 }
                 ImGui::SetNextItemWidth(U(260.0f));
                 {
-                    static const char *const kDelay[] = {"Automatic (from the connection)", "0 frames", "1 frame", "2 frames", "3 frames",
-                                                         "4 frames", "5 frames", "6 frames"};
-                    ImGui::Combo("Input delay", &delay, kDelay, 8);
+                    static const char *const kDelay[] = {"自动（根据连接状况）", "0 帧", "1 帧", "2 帧", "3 帧",
+                                                         "4 帧", "5 帧", "6 帧"};
+                    ImGui::Combo("输入延迟", &delay, kDelay, 8);
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("How long after a press your own move comes out. A slow connection needs more, or the game\n"
-                                      "has to guess too far ahead and stutters. Automatic measures the connection when the match\n"
-                                      "starts: 1 frame on a good one, more on a slow one.");
+                    ImGui::SetTooltip("设置按下按键到动作生效的等待时间。连接较慢时需要更高的延迟，\n"
+                                      "否则过多预测可能导致卡顿。自动模式在比赛开始时测量连接状况：\n"
+                                      "连接良好时为 1 帧，连接较慢时增加。");
                 }
                 {
                     // The match's rules: the game's own versus menu is not shown online, so they are chosen here.
-                    static const char *const kBattle[] = {"Single battle", "Team battle", "DP battle (10 DP)", "DP battle (15 DP)", "DP battle (20 DP)"};
-                    static const char *const kTime[] = {"60 seconds", "90 seconds", "180 seconds", "240 seconds", "No limit"};
+                    static const char *const kBattle[] = {"单人对战", "组队对战", "DP 对战（10 DP）", "DP 对战（15 DP）", "DP 对战（20 DP）"};
+                    static const char *const kTime[] = {"60 秒", "90 秒", "180 秒", "240 秒", "不限时"};
                     if (battle < 0) {
                         battle = Port_Setting("net_battle", 0);
                         timeLimit = Port_Setting("net_time", 3);
@@ -908,27 +944,27 @@ static void build_net(void) {
                     }
                     ImGui::Spacing();
                     ImGui::SetNextItemWidth(U(260.0f));
-                    ImGui::Combo("Battle", &battle, kBattle, 5);
+                    ImGui::Combo("对战模式", &battle, kBattle, 5);
                     ImGui::SetNextItemWidth(U(260.0f));
-                    ImGui::Combo("Time limit", &timeLimit, kTime, 5);
+                    ImGui::Combo("时间限制", &timeLimit, kTime, 5);
                     {
                         if (speed < 0) {
                             speed = Port_Setting("net_speed_host", Port_NetSpeedStandard()) /* (a new name with 0.1.31: the standard went from 120 to 114) */;
                         }
                         ImGui::SetNextItemWidth(U(260.0f));
-                        ImGui::SliderInt("Game speed", &speed, 100, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-                        ImGui::SetItemTooltip("How fast the match runs, for both players; the sound keeps its pitch.\n"
-                                              "100%% is the game's own speed. %d%% is the competitive standard, and what\n"
-                                              "quick matches run at.\n"
-                                              "With a player on 0.1.29 only 100%% and 120%% are possible, with an older\n"
-                                              "release only 100%%.", Port_NetSpeedStandard());
+                        ImGui::SliderInt("游戏速度", &speed, 100, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+                        ImGui::SetItemTooltip("设置双方的游戏速度，声音音调保持不变。\n"
+                                              "100%% 为原版速度；%d%% 为竞技标准，\n"
+                                              "快速匹配也使用此速度。\n"
+                                              "与 0.1.29 版本联机时仅支持 100%% 或 120%%；\n"
+                                              "与更早版本联机时仅支持 100%%。", Port_NetSpeedStandard());
                     }
                 }
-                ImGui::TextDisabled("The lobby's first rules; its owner changes them on its page. Everyone needs the same game data.");
+                ImGui::TextDisabled("这些是大厅的初始规则，房主可在大厅页面修改。所有玩家需使用相同游戏数据。");
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Quick match", NULL, tabFlags("quick"))) {
-                static const char *const kQueue[] = {"Single battle", "Team battle", "DP battle (10 DP)", "DP battle (15 DP)", "DP battle (20 DP)"};
+            if (ImGui::BeginTabItem("快速匹配", NULL, tabFlags("quick"))) {
+                static const char *const kQueue[] = {"单人对战", "组队对战", "DP 对战（10 DP）", "DP 对战（15 DP）", "DP 对战（20 DP）"};
                 static Uint64 asked;
                 bool busy = sNetBusy; // (a search is under way: the queue is not changed under it)
                 tab = 2;
@@ -953,8 +989,7 @@ static void build_net(void) {
                         Port_LobbyQueuesAsk();
                     }
                 }
-                ImGui::TextWrapped("Be matched with whoever is searching the same queue. All quick matches have no time limit and run at %d%% speed, "
-                                   "between games with the original disc's data.", Port_NetSpeedStandard());
+                ImGui::TextWrapped("与同一队列中正在搜索的玩家匹配。快速匹配不限时，速度为 %d%%，双方均需使用原版镜像的游戏数据。", Port_NetSpeedStandard());
                 ImGui::BeginDisabled(busy);
                 for (int i = 0; i < 5; i++) {
                     char label[80];
@@ -962,21 +997,21 @@ static void build_net(void) {
                     if (n < 0) {
                         snprintf(label, sizeof(label), "%s", kQueue[i]);
                     } else {
-                        snprintf(label, sizeof(label), "%s   (%d searching)###q%d", kQueue[i], n, i);
+                        snprintf(label, sizeof(label), "%s   （%d 人搜索中）###q%d", kQueue[i], n, i);
                     }
                     ImGui::RadioButton(label, &sQueue, i);
                 }
                 ImGui::EndDisabled();
-                ImGui::TextDisabled("The two games connect to each other directly when they can, as in most online fighting");
-                ImGui::TextDisabled("games: a player who inspects their own network traffic can see the other's address.");
+                ImGui::TextDisabled("与多数联机格斗游戏一样，条件允许时双方直接连接。");
+                ImGui::TextDisabled("查看网络流量的玩家可以看到对方地址。");
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Join", NULL, tabFlags("join"))) {
+            if (ImGui::BeginTabItem("加入", NULL, tabFlags("join"))) {
                 tab = 1;
                 ImGui::SetNextItemWidth(U(120.0f));
-                ImGui::InputText("Room code", roomCode, sizeof(roomCode), ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank);
+                ImGui::InputText("房间码", roomCode, sizeof(roomCode), ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank);
                 ImGui::SameLine();
-                if (ImGui::Button("Paste")) { // the letters and digits of what was copied, as capitals
+                if (ImGui::Button("粘贴")) { // the letters and digits of what was copied, as capitals
                     char *clip = SDL_GetClipboardText();
                     size_t n = 0;
                     for (const char *c = clip; c != NULL && *c != '\0' && n + 1 < sizeof(roomCode); c++) {
@@ -987,28 +1022,30 @@ static void build_net(void) {
                     roomCode[n] = '\0';
                     SDL_free(clip);
                 }
-                ImGui::TextDisabled("or, without a code, the host's address and port:");
+                ImGui::TextDisabled("或不使用房间码，填写房主地址和端口：");
                 ImGui::BeginDisabled(roomCode[0] != '\0');
                 ImGui::SetNextItemWidth(U(260.0f));
-                ImGui::InputText("Host's address", address, sizeof(address));
+                ImGui::InputText("房主地址", address, sizeof(address));
                 ImGui::SetNextItemWidth(U(120.0f));
-                ImGui::InputText("Port", port, sizeof(port), ImGuiInputTextFlags_CharsDecimal);
+                ImGui::InputText("端口", port, sizeof(port), ImGuiInputTextFlags_CharsDecimal);
                 ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
+            ImGui::EndDisabled();
             ImGui::EndTabBar();
             if (firstTab != NULL && --firstFrames <= 0) {
                 firstTab = NULL;
             }
         }
+        sServerTab = tab == 3;
         ImGui::Spacing();
-        {
+        if (tab != 3) {
             int state = Port_LobbyPoll();
             sNetBusy = state == 1 || state == 3;
             if (state == 5) { // the code or address was a lobby's: this game is its member; its screen is the game's
                 Port_LobbyCancel(); // (the lobby has the socket now)
                 const char *said = MenuTranslation_PortText(PORT_TEXT_LOBBY_JOINED);
-                Port_UiNotice(said != NULL ? said : "You are in the lobby. Its screen opens from the main menu (Tenkaichi Budokai Online).");
+                Port_UiNotice(said != NULL ? said : "已加入大厅，可从主菜单的联机模式进入大厅页面。");
                 set_open(false);
                 ImGui::End();
                 return;
@@ -1025,23 +1062,23 @@ static void build_net(void) {
             if (tab == 2) {
                 quick_status(state, lastState, name);
             } else if (state == 3 || state == 1) { // joining a code: asking the service, then reaching the lobby's owner
-                ImGui::TextUnformatted(Port_LobbyCheckingData() ? "Checking your game data... Connecting begins when it is done."
-                                       : state == 1 ? "Found the lobby. Connecting to its owner..." : "Looking for the lobby...");
-                if (ImGui::Button("Cancel", ImVec2(U(120.0f), 0.0f))) {
+                ImGui::TextUnformatted(Port_LobbyCheckingData() ? "正在检查游戏数据，完成后开始连接…"
+                                       : state == 1 ? "已找到大厅，正在连接房主…" : "正在查找大厅…");
+                if (ImGui::Button("取消", ImVec2(U(120.0f), 0.0f))) {
                     Port_LobbyCancel();
                     lastState = 0;
                 }
             } else {
                 if (lastState == -3) {
-                    ImGui::TextWrapped("%s", Port_LobbyError());
+                    ImGui::TextWrapped("%s", UiZh(Port_LobbyError()));
                 } else if (lastState == -4) {
-                    ImGui::TextWrapped("The two games could not reach each other, directly or through the relay. "
-                                       "Hosting on a port (with port forwarding or a virtual network such as Tailscale) still works.");
+                    ImGui::TextWrapped("直连和中继均未能连接双方。"
+                                       "仍可使用指定端口创建房间（端口转发，或 Tailscale 等虚拟局域网）。");
                 }
                 bool can = Port_OnlineBlocked() == NULL && (byCode ? (tab == 0 || strlen(roomCode) == 6) : atoi(port) > 0 && atoi(port) < 65536 && (tab == 0 || address[0] != '\0'));
                 bool lobby = false; // a lobby was opened or joined: its page is the screens' (the main menu opens it)
                 ImGui::BeginDisabled(!can);
-                if (ImGui::Button(tab == 0 ? "Open a lobby" : "Join the lobby", ImVec2(U(200.0f), 0.0f))) {
+                if (ImGui::Button(tab == 0 ? "创建大厅" : "加入大厅", ImVec2(U(200.0f), 0.0f))) {
                     Port_NetNameSet(name);
                     Port_SettingTextSave("net_name", name);
                     lastState = 0;
@@ -1075,29 +1112,30 @@ static void build_net(void) {
                 }
                 ImGui::EndDisabled();
                 ImGui::SameLine();
-                if (ImGui::Button("Back", ImVec2(U(120.0f), 0.0f))) {
+                if (ImGui::Button("返回", ImVec2(U(120.0f), 0.0f))) {
                     open = false;
                 }
                 if (lobby) {
                     const char *said = MenuTranslation_PortText(PORT_TEXT_LOBBY_JOINED);
-                    Port_UiNotice(said != NULL ? said : "You are in the lobby. Its screen opens from the main menu (Tenkaichi Budokai Online).");
+                    Port_UiNotice(said != NULL ? said : "已加入大厅，可从主菜单的联机模式进入大厅页面。");
                     set_open(false);
                     ImGui::End();
                     return;
                 }
                 if (state == -2) {
-                    ImGui::TextWrapped("The other game is a different version. Everyone needs the same release.");
+                    ImGui::TextWrapped("对方游戏版本不同，所有玩家需使用相同版本。");
                 } else if (state < 0) {
-                    ImGui::TextWrapped("The search could not be started.");
+                    ImGui::TextWrapped("无法开始搜索。");
                 }
             }
         }
         ImGui::Spacing();
-        ImGui::TextDisabled("In a match both players get the same roster, with everything unlocked, and your own save is");
-        ImGui::TextDisabled("left alone. When the match ends everyone is back on the lobby's page.");
+        ImGui::TextDisabled("联机时双方使用相同的完整角色列表，所有内容均已解锁，个人存档保持不变。");
+        ImGui::TextDisabled("比赛结束后，所有玩家返回大厅页面。");
     }
     ImGui::End();
     if (!open) {
+        OnlineLobby::Close();
         Port_LobbyCancel();
         set_open(false);
     }
@@ -1105,18 +1143,19 @@ static void build_net(void) {
 
 void Ui_Toggle(void) {
     if (sReady && !sQuit) {
+        if (sOpen && sNet) { OnlineLobby::Close(); Port_LobbyCancel(); }
         set_open(!sOpen);
     }
 }
 
 static void bind(int value) {
-    if (sCapAction == PORT_ACTIONS) { // the row "Open this window"
+    if (sCapAction == PORT_ACTIONS) { // the row "打开设置窗口"
         if (sCapKind == 1) {
             *PortInput_OverlayKey() = value > 0 ? value : SDL_SCANCODE_F1; // (cleared = F1 again: a keyboard always has a way in)
         } else if (value < PORT_PAD_LT) { // (a button, not a trigger)
             *PortInput_OverlayPad() = value;
         }
-    } else if (sCapAction == PORT_ACTIONS + 1) { // the row "Open online chat"
+    } else if (sCapAction == PORT_ACTIONS + 1) { // the row "打开联机聊天"
         if (sCapKind == 1) {
             *PortInput_ChatKey() = value > 0 ? value : SDL_SCANCODE_TAB;
         }
@@ -1174,6 +1213,7 @@ static int chat_event(const SDL_Event *ev) {
 }
 
 int Ui_Event(const SDL_Event *ev) {
+    PortWii_MouseEvent(ev);
     if (!sReady) {
         return 0;
     }
@@ -1196,7 +1236,7 @@ int Ui_Event(const SDL_Event *ev) {
                 PortQuit_Action(PORT_QUIT_MOVE);
             }
         } else if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-            SDL_GamepadButton button = (SDL_GamepadButton)ev->gbutton.button;
+            SDL_GamepadButton button = (SDL_GamepadButton)PortInput_UiButton(SDL_GetGamepadFromID(ev->gbutton.which), ev->gbutton.button);
             if (button == SDL_GAMEPAD_BUTTON_SOUTH) { PortQuit_Action(PORT_QUIT_CONFIRM); }
             else if (button == SDL_GAMEPAD_BUTTON_EAST) { PortQuit_Action(PORT_QUIT_CANCEL); }
             else if (button == SDL_GAMEPAD_BUTTON_DPAD_LEFT || button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ||
@@ -1235,8 +1275,13 @@ int Ui_Event(const SDL_Event *ev) {
                ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev->type == SDL_EVENT_MOUSE_BUTTON_UP || ev->type == SDL_EVENT_MOUSE_WHEEL;
     }
     if (!sOpen) {
+        if (meter_on() && (ev->type == SDL_EVENT_MOUSE_MOTION || ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev->type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+            ImGui_ImplSDL3_ProcessEvent(ev);
+            return sMeterHover || sMeterDrag;
+        }
         return 0;
     }
+    if (PortWii_Event(ev)) { return 1; }
     if (sCapKind != 0) { // the next key or button is the binding; Esc leaves it as it was, Delete clears it
         bool done = false;
         if (ev->type == SDL_EVENT_KEY_DOWN) {
@@ -1262,7 +1307,7 @@ int Ui_Event(const SDL_Event *ev) {
         if (ev->type == SDL_EVENT_KEY_DOWN || ev->type == SDL_EVENT_KEY_UP) {
             return 1;
         }
-    } else if (ev->type == SDL_EVENT_KEY_DOWN && ev->key.scancode == SDL_SCANCODE_ESCAPE) {
+    } else if (!gPortInputCapture && ev->type == SDL_EVENT_KEY_DOWN && ev->key.scancode == SDL_SCANCODE_ESCAPE) {
         set_open(false);
         return 1;
     }
@@ -1277,8 +1322,8 @@ static const char *pad_source_name(int src) {
                                   "D-pad down", "D-pad left", "D-pad right", "Misc 1", "Right paddle 1", "Left paddle 1",
                                   "Right paddle 2", "Left paddle 2", "Touchpad"};
     static char other[24];
-    if (src == PORT_PAD_LT) { return "Left trigger"; }
-    if (src == PORT_PAD_RT) { return "Right trigger"; }
+    if (src == PORT_PAD_LT) { return "左扳机"; }
+    if (src == PORT_PAD_RT) { return "右扳机"; }
     if (src < 0) { return "-"; }
     if (src < (int)(sizeof(names) / sizeof(names[0]))) { return names[src]; }
     snprintf(other, sizeof(other), "Button %d", src);
@@ -1295,86 +1340,76 @@ static bool tab(const char *label, int index) {
 }
 
 static void video_tab(PortVideo &v) {
-    static const struct { const char *name; int milli; } aspects[] = {{"4:3 (original)", 1333}, {"16:10", 1600}, {"16:9", 1778}, {"21:9", 2389}, {"32:9", 3556}};
+    static const struct { const char *name; int milli; } aspects[] = {{"4:3（原版）", 1333}, {"16:10", 1600}, {"16:9", 1778}, {"21:9", 2389}, {"32:9", 3556}};
     char label[64];
     int best = 0, count = 0;
 
     snprintf(label, sizeof(label), "%dx  (%d x %d)", v.scale, 512 * v.scale, 448 * v.scale);
-    if (ImGui::BeginCombo("Internal resolution", label)) {
+    if (ImGui::BeginCombo("内部分辨率", label)) {
         for (int n = 1; n <= 8; n++) {
             snprintf(label, sizeof(label), "%dx  (%d x %d)", n, 512 * n, 448 * n);
             if (ImGui::Selectable(label, n == v.scale)) { v.scale = n; }
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("How finely the game is drawn. 1x is the PlayStation 2's own resolution.\nHigher is sharper and uses more video memory.");
+    ImGui::SetItemTooltip("游戏渲染分辨率。1 倍为 PS2 原始分辨率，越高越清晰，也越占用显存。");
     for (int i = 1; i < (int)(sizeof(aspects) / sizeof(aspects[0])); i++) {
         if (abs(aspects[i].milli - v.aspectMilli) < abs(aspects[best].milli - v.aspectMilli)) { best = i; }
     }
-    if (ImGui::BeginCombo("Aspect ratio", aspects[best].name)) {
+    if (ImGui::BeginCombo("画面比例", aspects[best].name)) {
         for (int i = 0; i < (int)(sizeof(aspects) / sizeof(aspects[0])); i++) {
             if (ImGui::Selectable(aspects[i].name, i == best)) { v.aspectMilli = aspects[i].milli; }
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Wider than 4:3 shows more of the fight to the sides. Menus are stretched.");
-    if (ImGui::BeginCombo("2D filtering", v.smooth2d ? "Smooth" : "Sharp (console)")) {
-        if (ImGui::Selectable("Sharp (console)", !v.smooth2d)) { v.smooth2d = 0; }
-        if (ImGui::Selectable("Smooth", v.smooth2d != 0)) { v.smooth2d = 1; }
+    ImGui::SetItemTooltip("宽于 4:3 时显示更多战斗场景，菜单会被拉伸。");
+    if (ImGui::BeginCombo("2D 滤镜", v.smooth2d ? "平滑" : "锐利（原版）")) {
+        if (ImGui::Selectable("锐利（原版）", !v.smooth2d)) { v.smooth2d = 0; }
+        if (ImGui::Selectable("平滑", v.smooth2d != 0)) { v.smooth2d = 1; }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("How the display of a fight, the menus and text are drawn above 1x internal resolution.\n"
-                          "Sharp: each of the PlayStation 2's pixels is a block. Smooth: as an emulator shows them.\n"
-                          "No difference at 1x.");
+    ImGui::SetItemTooltip("高于 1 倍分辨率时，锐利保留原版像素块，平滑使用模拟器式滤镜。1 倍时没有区别。");
     bool full = v.fullscreen != 0;
-    if (ImGui::Checkbox("Full screen", &full)) { v.fullscreen = full; }
+    if (ImGui::Checkbox("全屏", &full)) { v.fullscreen = full; }
     ImGui::SameLine();
     ImGui::TextDisabled("(F11)");
     {
         bool vs = v.vsync != 0, fs = v.frameSkip != 0;
-        if (ImGui::Checkbox("V-sync", &vs)) { v.vsync = vs; }
-        ImGui::SetItemTooltip("Each picture waits for the display's refresh. Turn it on if the picture tears.\n"
-                              "Off is the default: it adds a little delay.");
-        if (ImGui::Checkbox("Skip pictures instead of slowing down", &fs)) { v.frameSkip = fs; }
-        ImGui::SetItemTooltip("When this machine cannot show a picture in time, the game normally runs slower.\n"
-                              "With this on it stays at full speed and leaves pictures out instead (choppier,\n"
-                              "not slower). It helps where the graphics chip is the slow part. On by default.");
+        if (ImGui::Checkbox("垂直同步", &vs)) { v.vsync = vs; }
+        ImGui::SetItemTooltip("本版本始终优先使用 Immediate 呈现，开启此选项也不会切换为 FIFO。\n不支持 Immediate 时使用兼容模式。");
+        if (ImGui::Checkbox("性能不足时跳帧以保持速度", &fs)) { v.frameSkip = fs; }
+        ImGui::SetItemTooltip("性能不足时通过跳过画面维持游戏速度，画面可能不连贯；默认开启。");
         {
             bool late = Port_LateInput() != 0;
-            if (ImGui::Checkbox("Low input lag (experimental)", &late)) { Port_LateInputSet(late); }
-            ImGui::SetItemTooltip("The game reads the controller, computes, and then waits before the picture is shown:\n"
-                                  "about 33 ms in a fight. With this on the wait comes first, so the picture follows\n"
-                                  "your press by the few milliseconds the machine needs. The game itself is unchanged.\n"
-                                  "With Smooth motion as well: its in-between picture then follows your press at once and\n"
-                                  "the full one a refresh later. Not used online. Off by default: on a machine that\n"
-                                  "cannot keep up it may stutter where the original order would not.");
+            if (ImGui::Checkbox("低输入延迟（实验性）", &late)) { Port_LateInputSet(late); }
+            ImGui::SetItemTooltip("实验性：先等待再读取输入，缩短输入至画面的延迟。配合平滑运动时，中间帧先响应输入，完整帧在下一次刷新显示。联机时不启用；性能不足时可能卡顿，默认关闭。");
         }
         {
             extern int Port_Setting(const char *name, int def);
             extern void Port_SettingSave(const char *name, int value);
             bool thr = Port_Setting("render_thread", 0) != 0;
-            if (ImGui::Checkbox("Render on a second processor core (experimental, after a restart)", &thr)) {
+            if (ImGui::Checkbox("独立核心渲染（实验性，重启后生效）", &thr)) {
                 Port_SettingSave("render_thread", thr ? 1 : 0);
                 Port_SettingsWrite(); /* (kept outside the window's own values: written here, or it was lost at the end) */
             }
-            ImGui::SetItemTooltip("The picture is prepared and shown on a core of its own while the game computes the next\n"
-                                  "moment: faster where the processor is the slow part (older or low-power machines).\n"
-                                  "The same picture and the same game. Takes effect when the game is started again.\n"
-                                  "Not with the OpenGL renderer, and not on machines with two cores or fewer.");
+            ImGui::SetItemTooltip("游戏计算时，由独立核心准备并显示画面。处理器性能受限时可提高速度。\n"
+                                  "画面和游戏内容保持一致，重启游戏后生效。\n"
+                                  ""
+                                  "不适用于 OpenGL 渲染器或仅有两个及更少核心的设备。");
         }
     }
     SDL_DisplayID *displays = SDL_GetDisplays(&count);
     if (v.display > count) { v.display = 0; }
-    snprintf(label, sizeof(label), "%s", v.display == 0 ? "Chosen by the desktop" : SDL_GetDisplayName(displays[v.display - 1]));
-    if (ImGui::BeginCombo("Display", label)) {
-        if (ImGui::Selectable("Chosen by the desktop", v.display == 0)) { v.display = 0; }
+    snprintf(label, sizeof(label), "%s", v.display == 0 ? "跟随桌面" : SDL_GetDisplayName(displays[v.display - 1]));
+    if (ImGui::BeginCombo("显示器", label)) {
+        if (ImGui::Selectable("跟随桌面", v.display == 0)) { v.display = 0; }
         for (int i = 0; i < count; i++) {
             snprintf(label, sizeof(label), "%d: %s", i + 1, SDL_GetDisplayName(displays[i]));
             if (ImGui::Selectable(label, v.display == i + 1)) { v.display = i + 1; }
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Takes effect the next time the game starts.");
+    ImGui::SetItemTooltip("下次启动游戏时生效。");
     SDL_free(displays);
     {   // which renderer draws the game: Vulkan (the default) or OpenGL 3.3, for machines without a working Vulkan
         static const char *const kApi[] = {"Vulkan", "OpenGL"};
@@ -1382,32 +1417,28 @@ static void video_tab(PortVideo &v) {
         if (api < 0) {
             api = Port_Setting("gpu_api", 0) == 1 ? 1 : 0;
         }
-        if (ImGui::Combo("Renderer", &api, kApi, 2)) {
+        if (ImGui::Combo("渲染器", &api, kApi, 2)) {
             Port_SettingSave("gpu_api", api);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("Takes effect the next time the game starts. Both draw the same picture; Vulkan is faster.\n"
-                              "If the chosen one cannot start, the game tries the other.");
+        ImGui::SetItemTooltip("下次启动生效。两种渲染器画面相同，Vulkan 通常更快；启动失败时尝试另一种。");
         if (api != (sGL ? 1 : 0)) {
-            ImGui::TextDisabled("Running now: %s. %s from the next start.", kApi[sGL ? 1 : 0], kApi[api]);
+            ImGui::TextDisabled("当前：%s；下次启动使用 %s。", kApi[sGL ? 1 : 0], kApi[api]);
         }
-        ImGui::TextWrapped("Active GPU: %s", sGpuName);
+        ImGui::TextWrapped("当前显卡：%s", sGpuName);
     }
     {
         // In-between pictures (gs_draw.c): the fight is computed 30 times a second, as on the console; with this
         // on one more picture is drawn between each two. The game itself, its replays and online play are the same.
-        static const char *kSmooth[] = { "Off (30, as the console)", "60 pictures a second", "120 pictures a second", "240 pictures a second" };
+        static const char *kSmooth[] = { "关闭（原版 30 帧）", "每秒 60 帧", "每秒 120 帧", "每秒 240 帧" };
         int smooth = gsInterp < 0 ? 0 : gsInterp > 3 ? 3 : gsInterp;
         ImGui::SetNextItemWidth(U(416.0f));
-        if (ImGui::Combo("Smooth motion", &smooth, kSmooth, 4)) {
+        if (ImGui::Combo("平滑补帧", &smooth, kSmooth, 4)) {
             gsInterp = smooth;
             Port_SettingSave("interp", gsInterp);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("Experimental. The game computes a fight 30 times a second. With this, more pictures are\n"
-                              "drawn between each two. The fight itself does not change, and neither does online play.\n"
-                              "The newest picture reaches the screen later: 17 ms at 60, 25 ms at 120, 29 ms at 240.\n"
-                              "Choose what your screen can show. F9 switches it off and on.");
+        ImGui::SetItemTooltip("实验性：战斗仍以原版每秒 30 次计算，仅补充画面。60 / 120 / 240 帧分别增加约 17 / 25 / 29 毫秒显示延迟。F9 开关。");
     }
     {
         // The size of these windows, the chat and the notices: larger with a taller picture by itself (sUiScale)
@@ -1415,7 +1446,7 @@ static void video_tab(PortVideo &v) {
         char shown[16];
         snprintf(shown, sizeof(shown), "%d%%%%", steps * 5);
         ImGui::SetNextItemWidth(U(416.0f));
-        ImGui::SliderInt("Menu size", &steps, 10, 40, shown, ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SliderInt("菜单大小", &steps, 10, 40, shown, ImGuiSliderFlags_AlwaysClamp);
         int pct = steps * 5;
         if (ImGui::IsItemDeactivatedAfterEdit()) { // (applied on letting go: the slider would move under the pointer)
             sUiScalePct = pct;
@@ -1424,12 +1455,11 @@ static void video_tab(PortVideo &v) {
         } else if (!ImGui::IsItemActive()) {
             steps = (sUiScalePct < 0 ? 100 : sUiScalePct) / 5;
         }
-        ImGui::SetItemTooltip("The size of this window, the online windows, the chat and the notices. They already grow\n"
-                              "with a picture taller than 1080 pixels; this makes them larger or smaller than that.");
+        ImGui::SetItemTooltip("设置窗口、联机窗口、聊天与通知的大小。高于 1080 像素时自动放大；此项在此基础上调整。");
     }
     {
         bool on = meter_on();
-        if (ImGui::Checkbox("Show frame rate, and the connection in an online match", &on)) {
+        if (ImGui::Checkbox("显示帧率与联机状态", &on)) {
             sMeter = on;
             Port_SettingSave("meter", sMeter);
             Port_SettingsWrite();
@@ -1438,56 +1468,50 @@ static void video_tab(PortVideo &v) {
     ImGui::Spacing();
     if (v.texPackCount > 0) {
         bool on = v.texPack != 0;
-        snprintf(label, sizeof(label), "Texture pack (%d textures)", v.texPackCount);
+        snprintf(label, sizeof(label), "材质包（%d 个材质）", v.texPackCount);
         if (ImGui::Checkbox(label, &on)) { v.texPack = on; }
-        ImGui::SetItemTooltip("Replacement textures from the folder \"textures\" next to the game.");
+        ImGui::SetItemTooltip("读取游戏目录下 textures 文件夹中的替换材质。");
     } else {
         ImGui::BeginDisabled();
         bool off = false;
-        ImGui::Checkbox("Texture pack (none found)", &off);
+        ImGui::Checkbox("材质包（未找到）", &off);
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Put a pack's files (PCSX2 naming, .dds or .png) into a folder \"textures\" next to the game.");
+        ImGui::SetItemTooltip("将 PCSX2 命名的 .dds 或 .png 材质放入游戏目录的 textures 文件夹。");
     }
 }
 
 static void effects_tab(PortVideo &v) {
     static const struct { const char *name, *tip; } fx[7] = {
-        {"Outline", "The black line around the fighters."},
-        {"See-through tint", "The tint that shows a fighter behind scenery."},
-        {"Depth tint", "The haze that colours distant things."},
-        {"Glare and glow", "The bloom around bright things and the sky's glare."},
-        {"Distance blur", "The soft focus on distant scenery."},
-        {"Movement blur", "The blur of the scenery while the view turns or moves fast."},
-        {"Weather", "The haze of dust or mist that drifts over some stages (Desert and Rocky Area at noon, Rocky Area\n"
-                    "in the evening, Kami's Lookout; Glacier, Muscle Tower and the Time Chamber have a little of it too).\n"
-                    "A faint tint, made of big soft sprites over the whole picture: off, those stages run as fast as the\n"
-                    "others (a fifth faster at 3x)."},
+        {"人物描边", "角色周围的黑色轮廓线。"},
+        {"遮挡透视颜色", "角色被场景遮挡时显示的颜色。"},
+        {"远景色调", "为远处物体添加雾色。"},
+        {"眩光与泛光", "明亮物体周围的泛光与天空眩光。"},
+        {"远景模糊", "远处场景的柔焦效果。"},
+        {"动态模糊", "镜头旋转或快速移动时的场景模糊。"},
+        {"天气效果", "部分场景中飘动的沙尘或薄雾，包括沙漠、岩山、神殿，以及冰河、肌肉塔和精神时光屋等。关闭可改善这些场景的性能。"},
     };
     for (int i = 0; i < 7; i++) {
         bool on = !((v.fxOff >> i) & 1);
         if (ImGui::Checkbox(fx[i].name, &on)) { v.fxOff = (v.fxOff & ~(1 << i)) | (on ? 0 : 1 << i); }
         ImGui::SetItemTooltip("%s", fx[i].tip);
         if (i == 6 && on) { /* Weather on: how much of it (fx_off bit 128: half the sprites) */
-            static const char *const amount[2] = {"Full", "Light"};
+            static const char *const amount[2] = {"完整", "轻量"};
             int light = (v.fxOff >> 7) & 1;
             ImGui::Indent();
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
-            if (ImGui::Combo("Weather amount", &light, amount, 2)) { v.fxOff = (v.fxOff & ~128) | (light ? 128 : 0); }
-            ImGui::SetItemTooltip("Light: half of the haze's sprites, a thinner haze; about half of what switching it off gains.");
+            if (ImGui::Combo("天气效果强度", &light, amount, 2)) { v.fxOff = (v.fxOff & ~128) | (light ? 128 : 0); }
+            ImGui::SetItemTooltip("轻量：只绘制一半雾气，效果更淡，性能提升约为完全关闭的一半。");
             ImGui::Unindent();
         }
     }
     ImGui::Spacing();
-    ImGui::SliderInt("Glow strength", &v.glow, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("The glow around characters and things (a Super Saiyan's hair, auras).\n"
-                          "100%% is what the PlayStation 2 draws; the default here is 60%%.");
-    ImGui::SliderInt("Glare strength", &v.glare, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("The glare of the sky and the stage's light.\n"
-                          "100%% is what the PlayStation 2 draws; the default here is 60%%.");
+    ImGui::SliderInt("泛光强度", &v.glow, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("角色与物体周围的泛光（如超级赛亚人的头发、气焰）。PS2 原版为 100%%，移植版默认 60%%。");
+    ImGui::SliderInt("眩光强度", &v.glare, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("天空与场景光源的眩光。PS2 原版为 100%%，移植版默认 60%%。");
     bool sharp = v.sharpBlur != 0;
-    if (ImGui::Checkbox("Sharp stage blur", &sharp)) { v.sharpBlur = sharp; }
-    ImGui::SetItemTooltip("On: the stage's blur keeps the detail of the internal resolution (crisper, as other\n"
-                          "emulators show it upscaled). Off: as soft as the PlayStation 2 draws it. No difference at 1x.");
+    if (ImGui::Checkbox("清晰场景模糊", &sharp)) { v.sharpBlur = sharp; }
+    ImGui::SetItemTooltip("开启时场景模糊保留内部分辨率的细节；关闭时与 PS2 原版一样柔和。1 倍分辨率下没有区别。");
 }
 
 // ---- the automatic update (gs/net_update.c) ----
@@ -1499,11 +1523,12 @@ static void effects_tab(PortVideo &v) {
 // starts the new version. Later: no line over the menus until the next start.
 // Not when nobody is looking (the offscreen and dummy video drivers); BT3_UPDATE_CHECK=1 / 0 says otherwise.
 // BT3_UPDATE_AUTO=1 (testing) presses Update now and Restart now by itself.
+static const bool sLocalUpdates = true; // Signed updates published by this edition's administrator.
 static int sUpdCheck = -1;   // the setting; -1 not read yet
 static bool sUpdAsked;       // the check was started (or decided against)
 static Uint64 sUpdSince;     // when the game was first ready (the check waits a few seconds after it)
-static bool sUpdLater;       // "Later": no line over the menus for the rest of this run
-static bool sUpdNotes;       // "What's new" is open
+static bool sUpdLater;       // "稍后": no line over the menus for the rest of this run
+static bool sUpdNotes;       // "更新内容" is open
 static bool sUpdTold;        // the result of the last start's update was put over the picture
 static char sUpdWhy[256];    // Restart now could not be done: why
 static void set_notice(const char *text, Uint64 ms);
@@ -1543,13 +1568,14 @@ static bool upd_online(void) { // an online session or a lobby is on: it is neve
 static void upd_restart(void) {
     sUpdWhy[0] = '\0';
     if (upd_online()) {
-        SDL_strlcpy(sUpdWhy, "Finish the online session first.", sizeof(sUpdWhy));
+        SDL_strlcpy(sUpdWhy, "请先结束联机会话。", sizeof(sUpdWhy));
         return;
     }
     Update_Install(); // (in a thread: update_tick starts the new version when it is done)
 }
 
 static void update_tick(void) {
+    if (!sLocalUpdates) { sUpdCheck = 0; return; }
     if (sUpdCheck < 0) {
         sUpdCheck = Port_Setting("update_check", 1) != 0;
     }
@@ -1567,7 +1593,7 @@ static void update_tick(void) {
                 if (Update_Relaunch()) {
                     exit(0); // (as closing the window does)
                 }
-                SDL_strlcpy(sUpdWhy, "The update is installed, but the new version could not be started: close the game and start it again.",
+                SDL_strlcpy(sUpdWhy, "更新已安装，但无法启动新版本，请关闭游戏后重新启动。",
                             sizeof(sUpdWhy));
             }
         }
@@ -1577,7 +1603,7 @@ static void update_tick(void) {
         char line[256];
         sUpdTold = true;
         if (Update_LastResult(&ver) > 0) {
-            upd_fill(line, sizeof(line), PORT_TEXT_UPDATE_DONE, "Updated to {version}.", ver, 0);
+            upd_fill(line, sizeof(line), PORT_TEXT_UPDATE_DONE, "已更新至 {version}。", ver, 0);
             set_notice(line, 10000);
         }
     }
@@ -1610,21 +1636,22 @@ static void update_line(char *out, size_t size) {
     int mode = Port_GameMode();
 
     out[0] = '\0';
-    if (!sReady || sOpen || (mode != 4 && mode != 80)) {
+    if (!sLocalUpdates || !sReady || sOpen || (mode != 4 && mode != 80)) {
         return;
     }
     Update_Status(&u);
     if (u.state == UPD_AVAILABLE && !sUpdLater) {
-        upd_fill(out, size, PORT_TEXT_UPDATE_AVAILABLE, "Update {version} available. F1 to update.", u.latest, 0);
+        upd_fill(out, size, PORT_TEXT_UPDATE_AVAILABLE, "发现新版本 {version}，按 F1 查看。", u.latest, 0);
     } else if (u.state == UPD_DOWNLOADING || u.state == UPD_VERIFYING) {
-        upd_fill(out, size, PORT_TEXT_UPDATE_DOWNLOADING, "Downloading update {version}: {percent}%", u.latest, upd_percent(u));
+        upd_fill(out, size, PORT_TEXT_UPDATE_DOWNLOADING, "正在下载更新 {version}：{percent}%", u.latest, upd_percent(u));
     } else if (u.state == UPD_READY) {
-        upd_fill(out, size, PORT_TEXT_UPDATE_READY, "Update {version} is ready. F1 > Restart now.", u.latest, 0);
+        upd_fill(out, size, PORT_TEXT_UPDATE_READY, "更新 {version} 已就绪，请在 F1 菜单中选择立即重启。", u.latest, 0);
     }
 }
 
 // The top of the settings window: what there is to update, and the buttons.
 static void update_panel(void) {
+    if (!sLocalUpdates) { return; }
     UpdateStatus u;
     const char *ver;
     int last = Update_LastResult(&ver);
@@ -1632,7 +1659,7 @@ static void update_panel(void) {
 
     Update_Status(&u);
     if (last > 0 && u.state < UPD_AVAILABLE) {
-        ImGui::TextColored(green, "Updated to %s.", ver);
+        ImGui::TextColored(green, "已更新至 %s。", ver);
         ImGui::Separator();
     }
     if (u.state < UPD_AVAILABLE) {
@@ -1640,37 +1667,35 @@ static void update_panel(void) {
     }
     // the line that says where it stands
     if (u.state == UPD_AVAILABLE) {
-        ImGui::TextColored(gold, "Update %s available (this is %s).", u.latest, u.current);
+        ImGui::TextColored(gold, "发现新版本 %s（当前为 %s）。", u.latest, u.current);
     } else if (u.state == UPD_DOWNLOADING) {
-        ImGui::TextColored(gold, "Downloading %s: %d%% (%.1f of %.1f MB). You can go on playing.", u.latest, upd_percent(u), (double)u.got / 1e6,
+        ImGui::TextColored(gold, "正在下载 %s：%d%%（%.1f / %.1f MB），可继续游玩。", u.latest, upd_percent(u), (double)u.got / 1e6,
                            (double)u.total / 1e6);
         ImGui::ProgressBar((float)upd_percent(u) / 100.0f, ImVec2(-1.0f, 0.0f), "");
     } else if (u.state == UPD_VERIFYING) {
-        ImGui::TextColored(gold, "Checking the download of %s (its signature)...", u.latest);
+        ImGui::TextColored(gold, "正在验证 %s 的下载签名…", u.latest);
         ImGui::ProgressBar(1.0f, ImVec2(-1.0f, 0.0f), "");
     } else if (u.state == UPD_READY) {
-        ImGui::TextColored(green, "Update %s is downloaded and verified.", u.latest);
+        ImGui::TextColored(green, "更新 %s 已下载并通过验证。", u.latest);
     } else if (u.state == UPD_INSTALLING || u.state == UPD_INSTALLED) {
-        ImGui::TextColored(gold, "Installing %s...", u.latest);
+        ImGui::TextColored(gold, "正在安装 %s…", u.latest);
     } else if (u.state == UPD_FAILED) {
         ImGui::PushStyleColor(ImGuiCol_Text, red);
-        ImGui::TextWrapped("The update to %s was not installed: %s", u.latest, u.why);
+        ImGui::TextWrapped("未能安装更新 %s：%s", u.latest, u.why);
         ImGui::PopStyleColor();
     }
     // the buttons
     if (u.state == UPD_AVAILABLE && u.canInstall) {
-        if (ImGui::Button("Update now")) {
+        if (ImGui::Button("立即更新")) {
             Update_Download();
         }
-        ImGui::SetItemTooltip("Downloads the new version in the background and checks its signature; you go on playing\n"
-                              "meanwhile (online play waits until it is installed). Then Restart now installs it.\n"
-                              "Your saves, settings, game data, mods and texture packs are not touched.");
+        ImGui::SetItemTooltip("后台下载新版本并验证签名，期间可继续游玩（联机需等待安装完成）。\n下载完成后选择“立即重启”安装。存档、设置、游戏数据、模组和材质包均会保留。");
         ImGui::SameLine();
         if (!sUpdLater) {
-            if (ImGui::Button("Later")) {
+            if (ImGui::Button("稍后")) {
                 sUpdLater = true;
             }
-            ImGui::SetItemTooltip("No reminder over the menus until the next start.");
+            ImGui::SetItemTooltip("本次运行期间不再在菜单上显示提醒。");
             ImGui::SameLine();
         }
     } else if (u.state == UPD_READY) {
@@ -1678,30 +1703,29 @@ static void update_panel(void) {
         if (busy) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("Restart now")) {
+        if (ImGui::Button("立即重启")) {
             upd_restart();
         }
         if (busy) {
             ImGui::EndDisabled();
         }
-        ImGui::SetItemTooltip(busy ? "Not during an online session: finish it first."
-                                   : "Installs the update over the game's folder and starts the new version (if anything\n"
-                                     "goes wrong, every file is put back). Your saves and settings are not touched.");
+        ImGui::SetItemTooltip(busy ? "请先结束联机会话。"
+                                   : "将更新安装到游戏目录并启动新版本，若失败则恢复原文件。\n存档与设置均会保留。");
         ImGui::SameLine();
     } else if (u.state == UPD_FAILED && u.canInstall) {
-        if (ImGui::Button("Try again")) {
+        if (ImGui::Button("重试")) {
             Update_Download();
         }
         ImGui::SameLine();
     }
-    if (ImGui::Button(sUpdNotes ? "Hide what's new" : "What's new")) {
+    if (ImGui::Button(sUpdNotes ? "收起更新内容" : "更新内容")) {
         sUpdNotes = !sUpdNotes;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Release page")) {
+    if (ImGui::Button("发布页面")) {
         SDL_OpenURL(u.page);
     }
-    ImGui::SetItemTooltip("Opens the release page in your browser. To update by hand, copy the new files over the old ones.");
+    ImGui::SetItemTooltip("在浏览器中打开发布页面。手动更新时，用新文件覆盖旧文件。");
     if (!u.canInstall && u.cannot[0] != '\0') {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", u.cannot);
@@ -1709,7 +1733,7 @@ static void update_panel(void) {
     }
     if (Port_OnlineBlocked() != NULL && u.state != UPD_INSTALLED) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", Port_OnlineBlocked());
+        ImGui::TextWrapped("%s", UiZh(Port_OnlineBlocked()));
         ImGui::PopStyleColor();
     }
     if (sUpdWhy[0] != '\0') {
@@ -1720,7 +1744,7 @@ static void update_panel(void) {
     if (sUpdNotes) {
         const char *notes = Update_Notes();
         ImGui::BeginChild("notes", ImVec2(0.0f, U(180.0f)), ImGuiChildFlags_Borders);
-        ImGui::TextWrapped("%s", notes[0] != '\0' ? notes : "(The release has no notes.)");
+        ImGui::TextWrapped("%s", notes[0] != '\0' ? notes : "（此版本没有更新说明。）");
         ImGui::EndChild();
     }
     ImGui::Separator();
@@ -1728,17 +1752,19 @@ static void update_panel(void) {
 
 static void misc_tab(void) {
     {
-        bool chk = sUpdCheck != 0;
-        if (ImGui::Checkbox("Check for updates", &chk)) {
+        bool chk = sLocalUpdates && sUpdCheck != 0;
+        ImGui::BeginDisabled(!sLocalUpdates);
+        if (ImGui::Checkbox("检查更新", &chk)) {
             sUpdCheck = chk;
             Port_SettingSave("update_check", sUpdCheck);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("Once per start, ask GitHub for the newest release and say so if it is newer than this one.\n"
-                              "Nothing is downloaded until you press Update now (at the top of this window).");
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip(sLocalUpdates ? "每次启动时检查一次我们服务器发布的新版本与更新公告。"
+                                           : "此本地汉化版暂时关闭自动更新。请合并并保留本地修改后手动更新。");
         ImGui::SameLine();
-        ImGui::TextDisabled("(installed: %s)", Update_Version()); // (PR #107: the version that is running)
-        ImGui::SetItemTooltip("The version of Tenkaichi3Decomp currently running (\"dev\": built locally, never offered updates).");
+        ImGui::TextDisabled("（当前版本：%s）", Update_Version()); // (PR #107: the version that is running)
+        ImGui::SetItemTooltip("当前运行的 Tenkaichi3Decomp 版本（“dev”为本地构建，不接收更新）。");
     }
     // the start of the game (PR #50): read by FirstRun_Main, so they count from the next start
     static int sSkipLogos = -1, sSkipIntro = -1, sSkipCopy = -1;
@@ -1749,40 +1775,36 @@ static void misc_tab(void) {
     }
     bool logos = sSkipLogos != 0, intro = sSkipIntro != 0, copy = sSkipCopy != 0;
     ImGui::Spacing();
-    if (ImGui::Checkbox("Skip logos", &logos)) {
+    if (ImGui::Checkbox("跳过厂商标志", &logos)) {
         sSkipLogos = logos;
         Port_SettingSave("skip_logos", sSkipLogos);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("Start without the publisher and developer logos. From the next start of the game.");
-    if (ImGui::Checkbox("Skip intro video", &intro)) {
+    ImGui::SetItemTooltip("跳过发行商和开发商标志，下次启动生效。");
+    if (ImGui::Checkbox("跳过开场动画", &intro)) {
         sSkipIntro = intro;
         Port_SettingSave("skip_intro", sSkipIntro);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("Start without the opening movie. From the next start of the game.");
-    if (ImGui::Checkbox("Skip copyright page", &copy)) {
+    ImGui::SetItemTooltip("跳过开场动画，下次启动生效。");
+    if (ImGui::Checkbox("跳过版权页面", &copy)) {
         sSkipCopy = copy;
         Port_SettingSave("skip_copyright", sSkipCopy);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("The page of legal text shown for five seconds before the title screen, every time.");
+    ImGui::SetItemTooltip("跳过每次进入标题画面前显示 5 秒的版权文字。");
     bool hidePointer = Port_Setting("hide_pointer", 1) != 0;
-    if (ImGui::Checkbox("Hide the mouse pointer during play", &hidePointer)) {
+    if (ImGui::Checkbox("游戏中隐藏鼠标", &hidePointer)) {
         Port_SettingSave("hide_pointer", hidePointer);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("The pointer is hidden over the game and shown in this window, the online windows, the\n"
-                          "question before the game closes and while a chat line is typed.");
+    ImGui::SetItemTooltip("在游戏画面中隐藏鼠标；打开设置、联机、退出确认或输入聊天时显示。");
     bool quickSave = Port_Setting("save_quick", 1) != 0;
-    if (ImGui::Checkbox("Quick saving", &quickSave)) {
+    if (ImGui::Checkbox("快速存取", &quickSave)) {
         Port_SettingSave("save_quick", quickSave);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("Save and load without the memory card pages: no question, no waiting, a small card in the\n"
-                          "corner while it saves, and the save loaded at start without a page. Load in the options\n"
-                          "still asks first, then loads at once. A missing card, a full card or a failed save is\n"
-                          "still shown. Online the game's own pages always run. Off: the game's own pages.");
+    ImGui::SetItemTooltip("跳过记忆卡确认与等待页面，保存时在角落显示记忆卡图标，启动时自动读取存档。\n在选项中读取时仍会先询问，确认后立即读取。记忆卡缺失、容量不足或保存失败时\n仍会显示提示。联机时始终使用游戏原有页面。关闭后恢复游戏原有存取流程。");
 }
 
 // F1 > Online: the settings of online play (Tenkaichi Budokai Online's screens are the way in: the game's main menu), and
@@ -1792,63 +1814,92 @@ static void misc_tab(void) {
 // row "Let others watch your matches", for the rooms of two, went with them.)
 static void online_tab(void) {
     bool desyncEnds = Port_Setting("net_desync_end", 0) != 0;
-    if (ImGui::Checkbox("End an online match on a desync", &desyncEnds)) {
+    if (ImGui::Checkbox("发生不同步时结束联机对战", &desyncEnds)) {
         Port_SettingSave("net_desync_end", desyncEnds);
         Port_SettingsWrite();
     }
-    ImGui::SetItemTooltip("The two games compare what they compute. Off: when they no longer agree you are told, and the match\n"
-                          "goes on (the two screens may then show different fights). On: the match ends there.");
+    ImGui::SetItemTooltip("双方会比较计算结果。关闭时，不同步会显示提示，但比赛继续\n"
+                          "（双方画面可能不同）；开启时，发生不同步就结束比赛。");
     bool chat = PortChat_Enabled() != 0;
-    if (ImGui::Checkbox("Online chat", &chat)) {
+    if (ImGui::Checkbox("联机聊天", &chat)) {
         PortChat_EnabledSet(chat);
     }
-    ImGui::SetItemTooltip("Text with the other player of an online match. Tab opens a line (setting key_chat), Enter sends it,\n"
-                          "Esc puts it away; while it is typed the keyboard does not play, a controller does. Off: no lines\n"
-                          "are shown or sent. A player without it sees nothing.");
+    ImGui::SetItemTooltip("与联机对手文字聊天。Tab 打开输入，Enter 发送，Esc 取消。输入时键盘不控制游戏，手柄仍可操作。关闭后不收发聊天。");
     if (chat) {
         if (sChatSize < 0) {
             sChatSize = Port_Setting("chat_size", 1);
             if (sChatSize < 0 || sChatSize > 2) sChatSize = 1;
         }
-        static const char *const kChatSizes[] = {"Compact", "Normal", "Large"};
+        static const char *const kChatSizes[] = {"紧凑", "普通", "较大"};
         int size = sChatSize;
-        if (ImGui::Combo("Chat size", &size, kChatSizes, 3)) {
+        if (ImGui::Combo("聊天窗口大小", &size, kChatSizes, 3)) {
             sChatSize = size;
             Port_SettingSave("chat_size", sChatSize);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("How wide the online chat is and how many lines it shows (while typing / otherwise).\n"
-                              "Compact: 4 / 2, narrower.\n"
-                              "Normal: 6 / 4.\n"
-                              "Large: 8 / 6, wider, for large screens.");
+        ImGui::SetItemTooltip("紧凑：输入时 4 行、平时 2 行；普通：6 / 4 行；较大：8 / 6 行，适合大屏幕。");
     }
     ImGui::Spacing();
     if (getenv("BT3_UI_ADVANCED") != NULL) { // (testing, with BT3_UI_OPEN=7: the section opened, for a picture of it)
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     }
-    if (ImGui::CollapsingHeader("Advanced")) {
-        ImGui::TextWrapped("Dragon Net Battle is the first online window of this port. Tenkaichi Budokai Online (the main "
-                           "menu) does everything it does: lobbies by code or by address, and quick matches.");
+    if (ImGui::CollapsingHeader("高级选项")) {
+        ImGui::TextWrapped("龙网对战是本移植版早期的联机窗口。主菜单中的联机模式已包含它的全部功能：通过房间码或地址加入大厅，以及快速匹配。");
         ImGui::BeginDisabled(Port_NetActive() != 0);
-        if (ImGui::Button("Open Dragon Net Battle")) {
+        if (ImGui::Button("打开龙网对战")) {
             gPortNetMenuRequest = 1; // (opened in place of this window at the next frame: frame_build)
             set_open(false);
         }
         ImGui::EndDisabled();
         bool listed = Port_Setting("net_dnb_menu", 0) != 0;
-        if (ImGui::Checkbox("List Dragon Net Battle in the main menu", &listed)) {
+        if (ImGui::Checkbox("在主菜单显示龙网对战", &listed)) {
             Port_SettingSave("net_dnb_menu", listed ? 1 : 0);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("Shows the entry beside Tenkaichi Budokai Online the next time the main menu is opened.");
+        ImGui::SetItemTooltip("下次打开主菜单时，在联机模式旁显示龙网对战入口。");
     }
+}
+
+static const char kFreeNotice[] = "本游戏完全免费，如果你是买来的，请立即退款！";
+
+static void about_tab(void) {
+    ImGui::TextWrapped("%s", kFreeNotice);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextUnformatted("原作者：z3xox");
+    ImGui::TextUnformatted("项目地址：");
+    ImGui::TextLinkOpenURL("https://github.com/z3xox/Tenkaichi3Decomp");
+    ImGui::TextUnformatted("汉化与其它修改：珍妮-玛-爵旺");
+    ImGui::TextUnformatted("QQ联机群：485869029");
+    ImGui::Spacing();
+    ImGui::TextWrapped("感谢 有操作的水 小白 皇叔 的赞助与测试!");
+    ImGui::Text("版本号 %s", Update_Version());
+}
+
+// The title picture's bottom line, positioned within its letterboxed rectangle.
+static void title_notice_draw(void) {
+    const char *text = "按F1打开设置菜单  本游戏完全免费，如果你是买来的，请立即退款！";
+    ImFont *font = sTitleFont ? sTitleFont : ImGui::GetFont();
+    float size = (float)gUiPresentH * 0.033f;
+    ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    float maxWidth = (float)gUiPresentW * 0.90f;
+    if (extent.x > maxWidth) {
+        size *= maxWidth / extent.x;
+        extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+    }
+    float x = (float)gUiPresentX + ((float)gUiPresentW - extent.x) * 0.5f;
+    float y = (float)gUiPresentY + (float)gUiPresentH * 0.94f - extent.y * 0.5f;
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    dl->AddText(font, size, ImVec2(x + 1.0f, y + 1.0f), IM_COL32(0, 0, 0, 180), text);
+    dl->AddText(font, size, ImVec2(x, y), IM_COL32(255, 255, 255, 255), text);
 }
 
 static void ui_tab(PortVideo &v) {
     if (sLanguageCount > 0) {
         bool overridden = getenv("BT3_MENU_LANG") != NULL && getenv("BT3_MENU_LANG")[0] != '\0';
         ImGui::BeginDisabled(overridden || Port_NetActive());
-        if (ImGui::BeginCombo("Language", sLanguages[sLanguageChoice].name)) {
+        if (ImGui::BeginCombo("游戏语言", sLanguages[sLanguageChoice].name)) {
             for (int i = 0; i < sLanguageCount; i++) {
                 if (ImGui::Selectable(sLanguages[i].name, i == sLanguageChoice) && i != sLanguageChoice) language_choose(i);
                 if (i == sLanguageChoice) ImGui::SetItemDefaultFocus();
@@ -1856,19 +1907,19 @@ static void ui_tab(PortVideo &v) {
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Game language based on available translations.");
+        ImGui::SetItemTooltip("根据已安装的翻译选择游戏语言。");
         bool alwaysPrompt = Port_Setting("language_prompt_always", 0) != 0;
-        if (ImGui::Checkbox("Show language selector at startup", &alwaysPrompt)) {
+        if (ImGui::Checkbox("启动时显示语言选择", &alwaysPrompt)) {
             Port_SettingSave("language_prompt_always", alwaysPrompt);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("Show the language list at every normal startup when more than one language is available.");
+        ImGui::SetItemTooltip("有多种语言时，每次正常启动都显示语言列表。");
         if (sLanguageRestartPending) {
-            ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.35f, 1.0f), "Language saved. It will apply on the next launch.");
+            ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.35f, 1.0f), "语言已保存，下次启动生效。");
         }
         ImGui::Separator();
     }
-    if (ImGui::BeginCombo("Menu font", MenuText_FontName(v.menuFont))) {
+    if (ImGui::BeginCombo("菜单字体", MenuText_FontName(v.menuFont))) {
         for (int i = 0; i < MenuText_FontCount(); i++) {
             if (!MenuText_FontAvailable(i, MENU_TEXT_MENU)) { continue; }
             ImGui::PushID(i);
@@ -1878,8 +1929,8 @@ static void ui_tab(PortVideo &v) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Original uses the game's sprites. Other fonts replace matching menu labels immediately.\nBattle announcements have their own setting below.");
-    if (ImGui::BeginCombo("Battle font", MenuText_FontName(v.battleFont))) {
+    ImGui::SetItemTooltip("原版使用游戏图片，其他字体立即替换已匹配的菜单文字。战斗播报使用下方独立设置。");
+    if (ImGui::BeginCombo("战斗字体", MenuText_FontName(v.battleFont))) {
         for (int i = 0; i < MenuText_FontCount(); i++) {
             if (!MenuText_FontAvailable(i, MENU_TEXT_BATTLE)) { continue; }
             ImGui::PushID(i);
@@ -1889,8 +1940,8 @@ static void ui_tab(PortVideo &v) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Choose original battle announcements and HUD text, or any battle font listed in fonts.tsv.");
-    if (ImGui::BeginCombo("Dialogue / UI font", MenuText_FontName(v.textFont))) {
+    ImGui::SetItemTooltip("选择原版战斗播报与 HUD 文字，或 fonts.tsv 中列出的战斗字体。");
+    if (ImGui::BeginCombo("对话 / 界面字体", MenuText_FontName(v.textFont))) {
         for (int i = 0; i < MenuText_FontCount(); i++) {
             if (!MenuText_FontAvailable(i, MENU_TEXT_DIALOGUE)) { continue; }
             ImGui::PushID(i);
@@ -1900,66 +1951,54 @@ static void ui_tab(PortVideo &v) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetItemTooltip("Replace the shared font used by dialogue, subtitles and ordinary UI text.\n"
-                          "Original keeps the game's glyphs. Text placement, colors, shadows and icons are preserved.");
-    static const char *const kHud[] = {"At the screen's edges", "At the edges, long health bars", "In the middle, as in 4:3"};
-    ImGui::Combo("HUD Style", &v.hudLayout, kHud, 3);
-    ImGui::SetItemTooltip("Where a fight's health bars and gauges sit in a picture wider than 4:3.\n"
-                          "Long health bars: the bars reach from the edges to the timer.\n"
-                          "In the middle: the original 4:3 arrangement, next to the timer.");
+    ImGui::SetItemTooltip("替换对话、字幕及普通界面的共用字体。原版保留游戏字形；位置、颜色、阴影和图标保持不变。");
+    static const char *const kHud[] = {"屏幕两侧", "两侧长血条", "居中（原版 4:3）"};
+    ImGui::Combo("战斗界面样式", &v.hudLayout, kHud, 3);
+    ImGui::SetItemTooltip("设置宽屏时血条的位置。长血条从两侧延伸到计时器；居中为原版 4:3 布局。");
     {
         bool m43 = Port_Menus43() != 0;
-        if (ImGui::Checkbox("Menus in 4:3", &m43)) {
+        if (ImGui::Checkbox("菜单使用 4:3 比例", &m43)) {
             Port_Menus43Set(m43);
             Port_SettingSave("menus_43", m43);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("In a picture wider than 4:3, show the menus at their own shape with black at the sides\n"
-                              "instead of stretched to the width. Fights keep the wide picture.");
+        ImGui::SetItemTooltip("宽屏时菜单保留原版 4:3 比例并填充两侧，战斗仍使用宽屏。");
     }
     {
-        static const char *const kBars[] = {"Black", "Border", "Fighter panels"};
+        static const char *const kBars[] = {"黑色", "边框", "角色面板"};
         int b = sBars < 0 ? 0 : sBars;
-        if (ImGui::Combo("Side bars", &b, kBars, 3)) {
+        if (ImGui::Combo("两侧填充", &b, kBars, 3)) {
             sBars = b;
             Port_SettingSave("side_bars", sBars);
             Port_SettingsWrite();
         }
-        ImGui::SetItemTooltip("What fills the sides where the picture is narrower than the window:\n"
-                              "a 4:3 picture, or the menus with \"Menus in 4:3\", in a wide window.\n"
-                              "Fighter panels: the border, and in a fight each side's fighter with its name and form.\n"
-                              "Your own: a folder \"bars\" next to the game with trim.png (the strip along the\n"
-                              "picture, kept in proportion) and fill.png (stretched over the rest). Read at start.");
+        ImGui::SetItemTooltip("设置窄画面两侧的填充。角色面板会显示战斗角色的姓名与形态；可在游戏目录的 bars 文件夹放入 trim.png 和 fill.png 自定义。");
     }
     if (sBars == 2) { // the fighter panels' faces
-        font_picker("Name font", sPanelFont[0], "The fighter's name down the panel. The game's fonts, as for the Menu font\n"
-                                                "(a font of your own: add it to fonts/fonts.tsv). Default: the first of the list.");
-        font_picker("Form font", sPanelFont[1], "The form under the portrait. The game's fonts, as for the Menu font.\n"
-                                                "Default: the first of the list.");
+        font_picker("姓名字体", sPanelFont[0], "面板上的角色姓名字体。可在 fonts/fonts.tsv 添加字体；默认使用列表中的第一个。");
+        font_picker("形态字体", sPanelFont[1], "头像下方的形态字体，默认使用列表中的第一个。");
     }
 }
 
 extern "C" int gPortMusicFollows; // snd_adx.c: 1 = looping music is sped up or slowed down with the game
 
 static void audio_tab(PortVideo &v) {
-    ImGui::SliderInt("Music", &v.music, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SliderInt("Sound effects", &v.effects, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Hits, blasts, menu sounds. Takes effect with the next sound that starts.");
-    ImGui::SliderInt("Voices", &v.voices, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("The fighters' voices in a fight and the spoken lines outside one.");
-    ImGui::SliderInt("Stage sounds", &v.stage, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("A stage's background sound (wind, water) and its own effects.");
+    ImGui::SliderInt("音乐", &v.music, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SliderInt("音效", &v.effects, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("打击、气弹和菜单音效；下一次播放时生效。");
+    ImGui::SliderInt("语音", &v.voices, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("战斗中的角色语音及战斗外的对白。");
+    ImGui::SliderInt("场景声音", &v.stage, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("场景的风声、水声等环境声音及效果。");
     {
         bool follows = gPortMusicFollows > 0;
         ImGui::Spacing();
-        if (ImGui::Checkbox("Music follows game speed", &follows)) {
+        if (ImGui::Checkbox("音乐跟随游戏速度", &follows)) {
             gPortMusicFollows = follows;
             Port_SettingSave("music_follows_speed", follows);
             Port_SettingsWrite(); // (in the file at once: it was lost at the end unless another setting was written after it)
         }
-        ImGui::SetItemTooltip("When the game runs at another speed than 100%% (an online match, the Cheats tab):\n"
-                              "off, the music plays as it is; on, it is sped up or slowed down with the game,\n"
-                              "at its own pitch, as an emulator does. Spoken lines always follow the game.");
+        ImGui::SetItemTooltip("开启后，音乐的播放速度和音调跟随游戏速度；对白始终跟随游戏速度。");
     }
 }
 
@@ -1976,18 +2015,16 @@ extern "C" void Port_AudioRefresh(void);
 static void cheats_tab(void) {
     {
         int speed = Port_GameSpeed();
-        if (ImGui::SliderInt("Game speed", &speed, 50, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+        if (ImGui::SliderInt("游戏速度", &speed, 50, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
             Port_GameSpeedSet(speed);
             Port_AudioRefresh();
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             Port_SettingsWrite(); // (when the slider is let go: the speed was lost at the end unless another setting was written)
         }
-        ImGui::SetItemTooltip("How fast the game runs outside online play (the sound keeps its pitch). 100%% is the game's own;\n"
-                              "114%% is what competitive play uses. An online match never uses this value:\n"
-                              "its speed is the host's or the queue's.");
+        ImGui::SetItemTooltip("本地游戏速度，声音保持音调。原版为 100%%，竞技常用 114%%。联机使用房主或匹配队列的速度。");
         ImGui::SameLine();
-        if (ImGui::Button("Reset")) {
+        if (ImGui::Button("重置")) {
             Port_GameSpeedSet(100);
             Port_AudioRefresh();
             Port_SettingsWrite();
@@ -1995,28 +2032,26 @@ static void cheats_tab(void) {
         ImGui::Separator();
         ImGui::Spacing();
     }
-    ImGui::TextWrapped("Unlock everything: all characters, stages, music and items, and the largest amount of Zenni. "
-                       "This is a debug function the game's developers left in.");
+    ImGui::TextWrapped("使用游戏原有调试功能，解锁全部角色、场景、音乐和道具，并将金钱设为最大值。");
     ImGui::Spacing();
-    ImGui::TextWrapped("It also empties your records list, and it becomes permanent the next time the game saves. "
-                       "Use it after your save has been loaded (from the main menu on).");
+    ImGui::TextWrapped("同时会清空记录列表，下一次存档后永久生效。请在存档加载完成后使用。");
     ImGui::Spacing();
-    if (ImGui::Button("Unlock everything...")) {
-        ImGui::OpenPopup("Unlock everything?");
+    if (ImGui::Button("解锁全部…")) {
+        ImGui::OpenPopup("要解锁全部内容吗？");
     }
     if (gPortUnlockDone) {
         ImGui::SameLine();
-        ImGui::TextUnformatted("Done.");
+        ImGui::TextUnformatted("已完成。");
     }
-    if (ImGui::BeginPopupModal("Unlock everything?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Your records list will be emptied. This cannot be undone once the game saves.");
+    if (ImGui::BeginPopupModal("要解锁全部内容吗？", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("记录列表将被清空。游戏保存后无法撤销。");
         ImGui::Spacing();
-        if (ImGui::Button("Unlock", ImVec2(U(140.0f), 0.0f))) {
+        if (ImGui::Button("解锁", ImVec2(U(140.0f), 0.0f))) {
             gPortUnlockAll = 1;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(U(140.0f), 0.0f))) {
+        if (ImGui::Button("取消", ImVec2(U(140.0f), 0.0f))) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -2028,7 +2063,7 @@ static void cheats_tab(void) {
 // the triggers, and the settings for these and for vibration. For seeing a stick that drifts and choosing a deadzone
 // that covers it.
 static void sticks_panel(int player) {
-    static const char *const kStick[2] = {"Left stick", "Right stick"}, *const kTrigger[2] = {"Left trigger", "Right trigger"};
+    static const char *const kStick[2] = {"左摇杆", "右摇杆"}, *const kTrigger[2] = {"左扳机", "右扳机"};
     static const char *const kDir[5] = {"", "up", "down", "left", "right"};
     const float R = U(42.0f), box = 2.0f * R + U(8.0f);
     const ImU32 colZone = ImGui::GetColorU32(ImGuiCol_Text, 0.22f);
@@ -2072,90 +2107,240 @@ static void sticks_panel(int player) {
         ImGui::AlignTextToFramePadding(); // (in both cells: the second one's lines start that much lower anyway)
         if (view.connected) {
             ImGui::Text(view.dir[s] != 0 ? "%s: %s" : "%s", kStick[s], kDir[view.dir[s]]);
-            ImGui::Text("stick  %+.2f %+.2f", view.raw[s][0], view.raw[s][1]);
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(colGame), "game   %+.2f %+.2f", view.game[s][0], view.game[s][1]);
+            ImGui::Text("摇杆  %+.2f %+.2f", view.raw[s][0], view.raw[s][1]);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(colGame), "游戏  %+.2f %+.2f", view.game[s][0], view.game[s][1]);
         } else {
             ImGui::TextUnformatted(kStick[s]);
-            ImGui::TextDisabled("no controller");
+            ImGui::TextDisabled("未连接手柄");
             ImGui::TextDisabled(" ");
         }
         ImGui::SetNextItemWidth(U(100.0f));
-        snprintf(label, sizeof(label), "Deadzone##%d", s);
-        ImGui::SliderInt(label, &dead[s], -1, PORT_DEADZONE_MAX, dead[s] < 0 ? "Original" : "%d%%", ImGuiSliderFlags_AlwaysClamp);
+        snprintf(label, sizeof(label), "死区##%d", s);
+        ImGui::SliderInt(label, &dead[s], -1, PORT_DEADZONE_MAX, dead[s] < 0 ? "原版" : "%d%%", ImGuiSliderFlags_AlwaysClamp);
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             PortInput_Save();
         }
-        ImGui::SetItemTooltip("How far the stick has to be moved before the game is told anything (the shaded middle).\n"
-                              "Original: the game's own, 39%% for left / right and for up / down separately, a square.\n"
-                              "0%% to 90%%: a round one of that size instead; from its edge the value grows evenly\n"
-                              "to full at full tilt, and the stick counts as a direction half way between the two.\n"
-                              "The white dot is the stick, the ring what the game is given; after the stick's name,\n"
-                              "the direction the game takes it for. Choose a size that covers where the dot rests\n"
-                              "when the stick is let go.");
+        ImGui::SetItemTooltip("摇杆死区（中间阴影）。原版使用各轴约 39%% 的方形死区；0%% 至 90%% 为圆形死区。白点为实际摇杆，圆环为传给游戏的值。请覆盖松开摇杆后的漂移范围。");
         ImGui::EndGroup();
     }
     for (int s = 0; s < 2; s++) {
         ImGui::TableNextColumn();
         snprintf(label, sizeof(label), "%d%%%s", (int)(view.trigger[s] * 100.0f + 0.5f), view.triggerHeld[s] ? " pressed" : "");
         ImGui::ProgressBar(view.trigger[s], ImVec2(U(144.0f), 0.0f), label);
-        ImGui::SetItemTooltip("A trigger counts as pressed from %d%% on. The game is told pressed or not, nothing between.",
+        ImGui::SetItemTooltip("扳机超过 %d%% 时视为按下。游戏只区分按下和松开，不读取中间压力值。",
                               (PORT_TRIGGER_AT * 100 + 16383) / 32767);
         ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
         ImGui::TextUnformatted(kTrigger[s]);
     }
     ImGui::EndTable();
     bool on = vib[0] != 0;
-    if (ImGui::Checkbox("Vibration", &on)) {
+    if (ImGui::Checkbox("震动", &on)) {
         vib[0] = on;
         PortInput_Save();
     }
-    ImGui::SetItemTooltip("The game's own vibration (hits, clashes, charging), on this player's controller.\n"
-                          "The game's Options > Controller > Vibration has to be on as well: it is, unless you turned it off.\n"
-                          "The game gives none in a replay or for a side the computer plays.");
+    ImGui::SetItemTooltip("此玩家手柄的游戏震动（打击、对波、聚气等）。游戏内选项的震动也需开启；录像及电脑控制角色不会震动。");
     ImGui::BeginDisabled(!on);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(U(160.0f));
-    ImGui::SliderInt("Strength", &vib[1], 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SliderInt("强度", &vib[1], 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         PortInput_Save();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Test")) {
+    if (ImGui::Button("测试")) {
         PortInput_VibrationTest(player);
     }
-    ImGui::SetItemTooltip("Half a second of both motors at this strength.");
+    ImGui::SetItemTooltip("以当前强度测试双马达震动，持续半秒。");
     ImGui::EndDisabled();
     if (view.connected && !view.canVibrate) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(this controller has none)");
+        ImGui::TextDisabled("（此手柄不支持震动）");
+    }
+}
+
+// Wii mapping page: Dolphin-style groups, with the same expression used for input
+// and live tests. Physical controller input is never used for navigation here.
+static void wii_row(int player, int split, int action, const float *values, const char *name = NULL) {
+    ImGui::TableNextRow(); ImGui::TableNextColumn();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(name ? name : PortWii_ActionLabel(split, action));
+    ImGui::TableNextColumn();
+    PortWii_BindingButton(player, split, action, values[action]);
+}
+static bool wii_rows(const char *id) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) { return false; }
+    ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthFixed, U(74));
+    ImGui::TableSetupColumn("binding", ImGuiTableColumnFlags_WidthStretch);
+    return true;
+}
+static void wii_stick(int player, int stick, const float *values) {
+    float x = values[stick ? 23 : 19] - values[stick ? 22 : 18];
+    float y = values[stick ? 21 : 17] - values[stick ? 20 : 16];
+    float size = U(90), radius = U(39);
+    ImVec2 at = ImGui::GetCursorScreenPos();
+    at.x += (ImGui::GetContentRegionAvail().x - size) * 0.5f;
+    ImVec2 center(at.x + size / 2, at.y + size / 2);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(center, radius, ImGui::GetColorU32(ImGuiCol_FrameBg), 32);
+    dl->AddCircle(center, radius, ImGui::GetColorU32(ImGuiCol_Border), 32);
+    dl->AddLine(ImVec2(center.x - radius, center.y), ImVec2(center.x + radius, center.y), ImGui::GetColorU32(ImGuiCol_Border));
+    dl->AddLine(ImVec2(center.x, center.y - radius), ImVec2(center.x, center.y + radius), ImGui::GetColorU32(ImGuiCol_Border));
+    PortStickView view; PortInput_StickView(player, &view);
+    dl->AddCircleFilled(ImVec2(center.x + view.raw[stick][0] * radius, center.y + view.raw[stick][1] * radius), 3,
+                       ImGui::GetColorU32(ImGuiCol_Text), 12);
+    dl->AddCircleFilled(ImVec2(center.x + x * radius, center.y + y * radius), 5,
+                       ImGui::GetColorU32(ImVec4(0.35f, 0.95f, 0.55f, 1)), 12);
+    ImGui::Dummy(ImVec2(size, size));
+    ImGui::SetItemTooltip("白点：实际摇杆；绿点：共用表达式的输出（也包括键盘与鼠标）。");
+}
+static void wii_deadzone(int player, int stick) {
+    int *dead = PortInput_Deadzone(player);
+    ImGui::PushID(stick);
+    ImGui::SetNextItemWidth(-U(60));
+    ImGui::SliderInt("死区", &dead[stick], -1, PORT_DEADZONE_MAX, dead[stick] < 0 ? "原版" : "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit()) { PortInput_Save(); }
+    ImGui::SetItemTooltip("原版为各轴约 39%% 的方形死区；0%% 至 90%% 为圆形死区。沿用官方摇杆处理算法。");
+    ImGui::PopID();
+}
+static void wii_panel(int player, int split) {
+    float values[PORT_WII_ACTIONS];
+    PortWii_PreviewBindings(player, split, values);
+    ImGui::TextDisabled("左键检测 · 中键清除 · 右键逻辑设置 · 绿灯为触发（>50%%） · 此页仅用键鼠操作菜单");
+    int columns = ImGui::GetContentRegionAvail().x >= U(900) ? 4 : 2;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(U(6), U(2)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(U(8), U(4)));
+    if (ImGui::BeginTable("wii_groups", columns, ImGuiTableFlags_SizingStretchSame)) {
+        for (int group = 0; group < 4; group++) {
+            ImGui::TableNextColumn(); ImGui::PushID(group);
+            ImGui::BeginChild("group", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            if (group == 0) {
+                ImGui::SeparatorText("按键");
+                if (wii_rows("buttons")) {
+                    const int actions[] = {6, 4, 5, 7, 13, 14, 15};
+                    for (int a : actions) { wii_row(player, split, a, values); }
+                    if (split) {
+                        wii_row(player, split, 26, values);
+                        wii_row(player, split, 24, values);
+                        wii_row(player, split, 25, values);
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::TextWrapped("菜单：攻击键确认，飞行键返回。暴血仍需双击。");
+            } else if (group == 1 || group == 2) {
+                int stick = group - 1;
+                ImGui::SeparatorText(stick ? "角色 / 视角" : "移动摇杆");
+                wii_stick(player, stick, values);
+                if (wii_rows("stick")) {
+                    const char *directions[] = {"上", "下", "左", "右"};
+                    for (int i = 0; i < 4; i++) { wii_row(player, split, 16 + stick * 4 + i, values, stick ?
+                        (i == 0 ? "换人" : i == 1 ? "变身" : i == 2 ? "左视角" : "右视角") : directions[i]); }
+                    ImGui::EndTable();
+                }
+                wii_deadzone(player, stick);
+                if (!stick) {
+                    ImGui::SeparatorText("方向键");
+                    if (wii_rows("dpad")) {
+                        const char *names[] = {"上", "下", "左", "右"};
+                        for (int a = 0; a < 4; a++) { wii_row(player, split, a, values, names[a]); }
+                        ImGui::EndTable();
+                    }
+                } else if (!split) { ImGui::TextWrapped("左右同时切换角色；双击左右暴血。勾选控制分离可分别设置。"); }
+            } else {
+                ImGui::SeparatorText("升降 / 扳机");
+                PortStickView view; PortInput_StickView(player, &view);
+                ImGui::ProgressBar(view.trigger[0], ImVec2(-1, 0), "左扳机");
+                ImGui::ProgressBar(view.trigger[1], ImVec2(-1, 0), "右扳机");
+                if (wii_rows("triggers")) {
+                    const int actions[] = {10, 11, 8, 9};
+                    for (int a : actions) { wii_row(player, split, a, values); }
+                    ImGui::EndTable();
+                }
+                ImGui::SeparatorText("震动");
+                int *vib = PortInput_Vibration(player);
+                bool enabled = vib[0] != 0;
+                if (ImGui::Checkbox("启用", &enabled)) { vib[0] = enabled; PortInput_Save(); }
+                ImGui::BeginDisabled(!enabled);
+                ImGui::SetNextItemWidth(-U(60));
+                ImGui::SliderInt("强度", &vib[1], 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::IsItemDeactivatedAfterEdit()) { PortInput_Save(); }
+                if (ImGui::Button("测试震动")) { PortInput_VibrationTest(player); }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndChild(); ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar(2);
+    if (ImGui::CollapsingHeader("程序快捷键")) {
+        char label[128];
+        snprintf(label, sizeof(label), "%s##overlay_key", sCapKind == 1 && sCapAction == PORT_ACTIONS ? "请按键…" :
+                 SDL_GetScancodeName((SDL_Scancode)*PortInput_OverlayKey()));
+        if (ImGui::Button(label)) { capture(1, player, PORT_ACTIONS); }
+        ImGui::SameLine(); ImGui::TextUnformatted("打开设置窗口");
+        snprintf(label, sizeof(label), "%s##overlay_pad", sCapKind == 2 && sCapAction == PORT_ACTIONS ? "请按手柄键…" :
+                 *PortInput_OverlayPad() < 0 ? "START + SELECT" : pad_source_name(*PortInput_OverlayPad()));
+        if (ImGui::Button(label)) { capture(2, player, PORT_ACTIONS); }
+        ImGui::SameLine(); ImGui::TextUnformatted("手柄快捷键");
+        snprintf(label, sizeof(label), "%s##chat_key", sCapKind == 1 && sCapAction == PORT_ACTIONS + 1 ? "请按键…" :
+                 SDL_GetScancodeName((SDL_Scancode)*PortInput_ChatKey()));
+        if (ImGui::Button(label)) { capture(1, player, PORT_ACTIONS + 1); }
+        ImGui::SameLine(); ImGui::TextUnformatted("打开联机聊天");
     }
 }
 
 static void controls_tab(void) {
-    static int player;
+    int &player = sControlPlayer;
+    int previousPlayer = player;
     char label[96];
     int count = 0;
 
-    ImGui::RadioButton("Player 1", &player, 0);
+    ImGui::RadioButton("玩家 1", &player, 0);
     ImGui::SameLine();
-    ImGui::RadioButton("Player 2", &player, 1);
+    ImGui::RadioButton("玩家 2", &player, 1);
+    if (player != previousPlayer) { PortWii_Cancel(); }
+    ImGui::SameLine(0.0f, 24.0f);
+    int *mode = PortInput_ControlMode(player);
+    if (ImGui::Button(*mode ? "控制模式：Wii" : "控制模式：PS2")) {
+        *mode = !*mode;
+        WiiProfiles::Cancel();
+        PortWii_Cancel();
+        sCapKind = 0;
+        gPortInputCapture = 0;
+        PortInput_Save();
+    }
+    ImGui::SetItemTooltip("Wii 默认：右摇杆上换人、下变身，左右切视角 / 角色，双击左右暴血。菜单用左摇杆移动。\nRB / LB 升降，RT / LT 高速升降，按住右摇杆聚气。菜单 X 确认、A 返回。\nPS2 与 Wii 的键盘配置独立保存；勾选控制分离可独立绑定各功能。");
+    bool wii = *mode != 0;
+    int *split = PortInput_ControlSplit(player);
+    if (wii) {
+        ImGui::SameLine();
+        bool separated = *split != 0;
+        if (ImGui::Checkbox("控制分离", &separated)) {
+            *split = separated;
+            PortWii_Cancel();
+            PortInput_Save();
+        }
+        ImGui::SetItemTooltip("分别设置视角、角色选择和暴血；暴血依旧需要双击。\n新拆出的角色选择与暴血默认为未设置，请自行绑定。");
+        WiiProfiles::Draw(player, sUiScale);
+    }
+    bool separate = wii && *split;
     int *slot = PortInput_PadSlot(player), *keys = PortInput_Keys(player), *pads = PortInput_PadButtons(player);
     SDL_JoystickID *ids = SDL_GetGamepads(&count);
     if (*slot < 0) {
-        snprintf(label, sizeof(label), "None");
+        snprintf(label, sizeof(label), "无");
     } else if (*slot < count) {
         snprintf(label, sizeof(label), "%d: %s", *slot + 1, SDL_GetGamepadNameForID(ids[*slot]));
     } else {
-        snprintf(label, sizeof(label), "Controller %d (not connected)", *slot + 1);
+        snprintf(label, sizeof(label), "手柄 %d（未连接）", *slot + 1);
     }
     ImGui::SetNextItemWidth(U(300.0f));
-    if (ImGui::BeginCombo("Controller", label)) {
-        if (ImGui::Selectable("None", *slot < 0)) { *slot = -1; PortInput_Save(); }
+    if (ImGui::BeginCombo("手柄", label)) {
+        if (ImGui::Selectable("无", *slot < 0)) { *slot = -1; PortInput_Save(); }
         for (int i = 0; i < (count > 4 ? count : 4); i++) {
             if (i < count) {
                 snprintf(label, sizeof(label), "%d: %s", i + 1, SDL_GetGamepadNameForID(ids[i]));
             } else {
-                snprintf(label, sizeof(label), "Controller %d (not connected)", i + 1);
+                snprintf(label, sizeof(label), "手柄 %d（未连接）", i + 1);
             }
             if (ImGui::Selectable(label, *slot == i)) { *slot = i; PortInput_Save(); }
         }
@@ -2163,22 +2348,28 @@ static void controls_tab(void) {
     }
     SDL_free(ids);
     ImGui::SameLine();
-    if (ImGui::Button("Reset to defaults")) {
+    if (ImGui::Button("恢复默认设置")) {
         PortInput_ResetDefaults(player);
         PortInput_Save();
     }
-    if (ImGui::CollapsingHeader("Sticks, triggers and vibration", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (wii) { wii_panel(player, separate); return; }
+    if (ImGui::CollapsingHeader("摇杆、扳机与震动", ImGuiTreeNodeFlags_DefaultOpen)) {
         sticks_panel(player);
     }
-    ImGui::TextDisabled("Choose a binding, then press the new key or button. Esc keeps it, Delete clears it;");
-    ImGui::TextDisabled("with a controller, press nothing for five seconds to keep it.");
+    ImGui::TextDisabled(wii ? "左键检测；中键清除；右键设置逻辑表达式。Esc 取消检测。" :
+                             "点击绑定后按下新按键。Esc 取消，Delete 清除；");
+    if (!wii) {
+        ImGui::TextDisabled("手柄检测等待 5 秒后自动取消。");
+    }
     // (never lower than a few rows: in a small window the tab scrolls as a whole instead)
     if (ImGui::BeginTable("bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV,
                           ImVec2(0.0f, ImGui::GetContentRegionAvail().y > U(140.0f) ? ImGui::GetContentRegionAvail().y : U(140.0f)))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Action");
-        ImGui::TableSetupColumn("Keyboard");
-        ImGui::TableSetupColumn("Controller");
+        ImGui::TableSetupColumn("动作");
+        ImGui::TableSetupColumn("键盘");
+        if (!wii || separate) {
+            ImGui::TableSetupColumn("手柄");
+        }
         ImGui::TableHeadersRow();
         {   // what opens and closes this window (not a player's: one for the program)
             const int a = PORT_ACTIONS;
@@ -2187,16 +2378,18 @@ static void controls_tab(void) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Open this window");
+            ImGui::TextUnformatted("打开设置窗口");
             ImGui::TableNextColumn();
-            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "press a key..." : key > 0 ? SDL_GetScancodeName((SDL_Scancode)key) : "-", a);
+            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "请按键…" : key > 0 ? SDL_GetScancodeName((SDL_Scancode)key) : "-", a);
             if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
                 capture(1, player, a);
             }
-            ImGui::TableNextColumn();
-            snprintf(label, sizeof(label), "%s##p%d", waitPad ? "press a button..." : pad >= 0 ? pad_source_name(pad) : "START + SELECT", a);
-            if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
-                capture(2, player, a);
+            if (!wii || separate) {
+                ImGui::TableNextColumn();
+                snprintf(label, sizeof(label), "%s##p%d", waitPad ? "请按手柄键…" : pad >= 0 ? pad_source_name(pad) : "START + SELECT", a);
+                if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
+                    capture(2, player, a);
+                }
             }
         }
         {   // what opens the online chat (not a player's: one for the program)
@@ -2206,36 +2399,40 @@ static void controls_tab(void) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Open online chat");
+            ImGui::TextUnformatted("打开联机聊天");
             ImGui::TableNextColumn();
-            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "press a key..." : key > 0 ? SDL_GetScancodeName((SDL_Scancode)key) : "Tab", a);
+            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "请按键…" : key > 0 ? SDL_GetScancodeName((SDL_Scancode)key) : "Tab", a);
             if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
                 capture(1, player, a);
             }
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("-");
+            if (!wii || separate) {
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("-");
+            }
         }
-        for (int a = 0; a < PORT_ACTIONS; a++) {
+        for (int a = 0; a < (separate ? PORT_WII_ACTIONS : PORT_ACTIONS); a++) {
             bool waitKey = sCapKind == 1 && sCapPlayer == player && sCapAction == a;
             bool waitPad = sCapKind == 2 && sCapPlayer == player && sCapAction == a;
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(PortInput_ActionLabel(a));
+            ImGui::TextUnformatted(wii ? PortWii_ActionLabel(separate, a) : PortInput_ActionLabel(player, a));
             ImGui::TableNextColumn();
-            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "press a key..." : keys[a] > 0 ? SDL_GetScancodeName((SDL_Scancode)keys[a]) : "-", a);
+            snprintf(label, sizeof(label), "%s##k%d", waitKey ? "请按键…" : keys[a] > 0 ? SDL_GetScancodeName((SDL_Scancode)keys[a]) : "-", a);
             if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
                 capture(1, player, a);
             }
-            ImGui::TableNextColumn();
-            if (a < PORT_PAD_BUTTONS) {
-                snprintf(label, sizeof(label), "%s##p%d", waitPad ? "press a button..." : pad_source_name(pads[a]), a);
-                if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
-                    capture(2, player, a);
+            if (!wii) {
+                ImGui::TableNextColumn();
+                if (a < PORT_PAD_BUTTONS) {
+                    snprintf(label, sizeof(label), "%s##p%d", waitPad ? "请按手柄键…" : pad_source_name(pads[a]), a);
+                    if (ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f))) {
+                        capture(2, player, a);
+                    }
+                } else {
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextDisabled(a < 20 ? "左摇杆" : "右摇杆");
                 }
-            } else {
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled(a < 20 ? "Left stick" : "Right stick");
             }
         }
         ImGui::EndTable();
@@ -2246,6 +2443,7 @@ static void build(void) {
     PortVideo v, was;
     ImGuiIO &io = ImGui::GetIO();
     bool open = true;
+    bool openLobby = false;
 
     GsGpu_GetSettings(&v);
     was = v;
@@ -2257,73 +2455,75 @@ static void build(void) {
         open = false;
     }
     if (sForceTab < 0 && (pad_pressed(ImGuiKey_GamepadL1) || pad_pressed(ImGuiKey_GamepadR1))) {
-        sForceTab = (sTab + (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) ? 7 : 1)) % 8;
+        sForceTab = (sTab + (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) ? 8 : 1)) % 9;
         sPadTab = true;
     }
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     // (760 high where the picture has the room: the Controls tab's sticks and its list of bindings together)
-    { // (a large "Menu size" in a small window: no larger than the window)
-        float sw = U(640.0f), sh = io.DisplaySize.y >= U(800.0f) ? U(760.0f) : U(600.0f);
-        ImGui::SetNextWindowSize(ImVec2(sw < io.DisplaySize.x * 0.96f ? sw : io.DisplaySize.x * 0.96f,
-                                        sh < io.DisplaySize.y * 0.94f ? sh : io.DisplaySize.y * 0.94f), ImGuiCond_Appearing);
+    bool wide = (sTab == 4 || sForceTab == 4) && *PortInput_ControlMode(sControlPlayer);
+    static bool wasWide;
+    {
+        float sw = U(wide ? 1120.0f : 720.0f);
+        float sh = U(wide ? 900.0f : io.DisplaySize.y >= U(800.0f) ? 760.0f : 600.0f);
+        ImGui::SetNextWindowSize(ImVec2(std::min(sw, io.DisplaySize.x * 0.96f),
+                                       std::min(sh, io.DisplaySize.y * 0.94f)),
+                                 wide != wasWide ? ImGuiCond_Always : ImGuiCond_Appearing);
     }
-    if (ImGui::Begin("Settings", &open, ImGuiWindowFlags_NoCollapse)) {
+    wasWide = wide;
+    if (ImGui::Begin("设置", &open, ImGuiWindowFlags_NoCollapse)) {
         PortLobbyView lv;
         bool inLobby = Port_LobbyView(&lv) && lv.inMatch;
         if (inLobby) { // a lobby's match: the ways back (the owner: for everyone) and out
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Lobby%s%s", lv.code[0] != '\0' ? " " : "", lv.code);
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "大厅%s%s", lv.code[0] != '\0' ? " " : "", lv.code);
             if (lv.owner) {
                 ImGui::SameLine();
-                if (ImGui::Button("Back to the lobby")) {
+                if (ImGui::Button("返回大厅")) {
                     Port_LobbyDo(LOBBY_BACK, 0, 0);
                     open = false;
                 }
-                ImGui::SetItemTooltip("Ends the match for everyone: all go back to the lobby window, where the rules can be changed.");
+                ImGui::SetItemTooltip("结束所有玩家的比赛并返回大厅，可在那里修改规则。");
             }
             ImGui::SameLine();
-            if (ImGui::Button(lv.owner ? "Close the lobby" : "Leave the lobby")) {
+            if (ImGui::Button(lv.owner ? "关闭大厅" : "退出大厅")) {
                 Port_LobbyDo(LOBBY_LEAVE, 0, 0);
                 open = false;
             }
-            ImGui::SetItemTooltip(lv.owner ? "Ends the match and the lobby for everyone." : "Back to the main menu. A player leaving ends the match; a spectator leaving changes nothing for the others.");
+            ImGui::SetItemTooltip(lv.owner ? "为所有玩家结束比赛并关闭大厅。" : "返回主菜单。玩家退出会结束比赛；观战者退出不影响其他人。");
             ImGui::Separator();
         }
         if (Port_NetSpectating()) { // watching a match: whose view, and the way out
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Spectating %s vs %s", Port_NetName(0), Port_NetName(1));
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "正在观战：%s 对 %s", Port_NetName(0), Port_NetName(1));
             ImGui::SameLine();
-            if (ImGui::Button("Change view")) {
+            if (ImGui::Button("切换视角")) {
                 spec_view_next();
             }
-            ImGui::SetItemTooltip("Player 1's view, player 2's, or both (split screen). Also V or R1 while watching.");
-            if (!inLobby) { // (in a lobby: "Leave the lobby", above)
+            ImGui::SetItemTooltip("在 1P 视角、2P 视角和双方分屏间切换。观战时也可按 V 或 R1。");
+            if (!inLobby) { // (in a lobby: "退出大厅", above)
                 ImGui::SameLine();
-                if (ImGui::Button("Stop watching")) {
+                if (ImGui::Button("结束观战")) {
                     Port_NetSpecLeave();
                     open = false;
                 }
             }
-            ImGui::TextDisabled("View: %s", spec_view_name(Port_NetSpecView()));
+            ImGui::TextDisabled("视角：%s", spec_view_name(Port_NetSpecView()));
             ImGui::Separator();
         }
         update_panel();
         // the tabs in a region of their own, above a last line that is always there
         ImGui::BeginChild("body", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().ItemSpacing.y), ImGuiChildFlags_NavFlattened);
         if (ImGui::BeginTabBar("tabs")) {
-            if (tab("Video", 0)) { video_tab(v); ImGui::EndTabItem(); }
-            if (tab("Effects", 1)) { effects_tab(v); ImGui::EndTabItem(); }
-            if (tab("Audio", 2)) { audio_tab(v); ImGui::EndTabItem(); }
-            if (tab("UI", 3)) { ui_tab(v); ImGui::EndTabItem(); }
-            if (tab("Controls", 4)) {
+            if (tab("画面", 0)) { video_tab(v); ImGui::EndTabItem(); }
+            if (tab("特效", 1)) { effects_tab(v); ImGui::EndTabItem(); }
+            if (tab("声音", 2)) { audio_tab(v); ImGui::EndTabItem(); }
+            if (tab("界面", 3)) { ui_tab(v); ImGui::EndTabItem(); }
+            if (tab("控制", 4)) {
                 bool cs = Port_ClashSquare() != 0;
-                if (ImGui::Checkbox("Clashes: Square counts as a direction", &cs)) {
+                if (ImGui::Checkbox("对波 / 对冲：攻击键计为方向输入", &cs)) {
                     Port_ClashSquareSet(cs);
                 }
-                ImGui::SetItemTooltip("In a clash of two beams or two rushes the game counts newly pressed directions:\n"
-                                      "turning the stick, or tapping the d-pad. With this on, each press of Square\n"
-                                      "counts as one of them while the clash lasts, as a tap of the d-pad does.\n"
-                                      "It only changes your own pad, so it can be used in online play.");
+                ImGui::SetItemTooltip("对波或对冲时，游戏按新按下的方向计数。开启后，每次按攻击键也计为一次方向输入。");
                 if (cs) {
                     static const int kQuarters[] = {4, 6, 7, 8, 9};
                     static const char *const kWorth[] = {"1", "1.5", "1.75", "2", "2.25"};
@@ -2335,20 +2535,22 @@ static void build(void) {
                     }
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(U(80.0f));
-                    if (ImGui::Combo("per press", &at, kWorth, 5)) {
+                    if (ImGui::Combo("每次按下", &at, kWorth, 5)) {
                         Port_ClashSquareXSet(kQuarters[at]);
                     }
-                    ImGui::SetItemTooltip("What one press of Square is worth. The d-pad has four buttons to tap in turn and the\n"
-                                          "stick four directions a turn; Square is one button. 1 is a single d-pad tap.\n"
-                                          "Never more than one a frame, which is the most the game counts from any pad.");
+                    ImGui::SetItemTooltip("每次攻击键的计数权重。1 等于一次方向键输入，每帧最多计一次。");
                 }
                 ImGui::Separator();
                 controls_tab();
                 ImGui::EndTabItem();
             }
-            if (tab("Cheats", 5)) { cheats_tab(); ImGui::EndTabItem(); }
-            if (tab("Misc", 6)) { misc_tab(); ImGui::EndTabItem(); }
-            if (tab("Online", 7)) { online_tab(); ImGui::EndTabItem(); }
+            if (tab("辅助", 5)) { cheats_tab(); ImGui::EndTabItem(); }
+            if (tab("其他", 6)) { misc_tab(); ImGui::EndTabItem(); }
+            if (tab("联机", 7)) { online_tab(); ImGui::EndTabItem(); }
+            ImGui::BeginDisabled(Port_NetActive() != 0 || Lobby_Active() != 0);
+            if (ImGui::TabItemButton("大厅")) { openLobby = true; }
+            ImGui::EndDisabled();
+            if (tab("关于", 8)) { about_tab(); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
         ImGui::EndChild();
@@ -2360,13 +2562,14 @@ static void build(void) {
             sForceTab = -1;
         }
         ImGui::Separator();
-        if (ImGui::Button("Exit game")) {
+        if (ImGui::Button("退出游戏")) {
             Ui_QuitAsk();
         }
         if ((io.BackendFlags & ImGuiBackendFlags_HasGamepad) != 0) {
             ImGui::SameLine();
-            ImGui::TextDisabled("D-pad: move   Cross / A: choose   Circle / B: back   L1 / R1: tab");
+            ImGui::TextDisabled(sTab == 4 ? "控制设置页：使用键鼠操作菜单，手柄用于绑定与输入测试" : "方向键移动；PS2：A 确认 / B 返回；Wii：X 确认 / A 返回；LB / RB 切换标签");
         }
+        PortWii_DrawEditor();
     }
     ImGui::End();
     if (memcmp(&v, &was, sizeof(v)) != 0) {
@@ -2374,6 +2577,9 @@ static void build(void) {
     }
     if (!open) {
         set_open(false);
+    } else if (openLobby) {
+        OnlineLobby::Open();
+        net_open();
     }
 }
 
@@ -2407,7 +2613,7 @@ static void set_notice(const char *text, Uint64 ms) { // (from this thread: show
 }
 
 extern "C" void Port_UiNotice(const char *text) {
-    SDL_strlcpy(sNotice, text != NULL ? text : "", sizeof(sNotice));
+    SDL_strlcpy(sNotice, text != NULL ? UiZh(text) : "", sizeof(sNotice));
     sNoticeNew = 1;
 }
 
@@ -2476,9 +2682,9 @@ static void save_icon_draw(Uint64 now) {
 static const char *spec_view_name(int view) {
     static char text[48];
     if (view == 2) {
-        return "both (split screen)";
+        return "双方（分屏）";
     }
-    SDL_snprintf(text, sizeof(text), "%s", Port_NetName(view)[0] != '\0' ? Port_NetName(view) : view == 0 ? "player 1" : "player 2");
+    SDL_snprintf(text, sizeof(text), "%s", Port_NetName(view)[0] != '\0' ? Port_NetName(view) : view == 0 ? "玩家 1" : "玩家 2");
     return text;
 }
 
@@ -2491,7 +2697,7 @@ static void watchers_line(void) {
     ImGuiIO &io = ImGui::GetIO();
     char text[200];
     int n = Port_NetWatchers();
-    size_t at = (size_t)SDL_snprintf(text, sizeof(text), "%d watching: ", n);
+    size_t at = (size_t)SDL_snprintf(text, sizeof(text), "%d 人观战：", n);
     for (int i = 0; i < n && at < sizeof(text); i++) {
         at += (size_t)SDL_snprintf(text + at, sizeof(text) - at, "%s%s", i > 0 ? ", " : "", Port_NetWatcher(i));
     }
@@ -2534,32 +2740,45 @@ static void meter_count(void) { // once per frame shown
 
 static void meter_draw(void) {
     int n[10];
-    ImGui::SetNextWindowPos(ImVec2(U(8.0f), U(8.0f)), ImGuiCond_Always);
+    ImGuiIO &io = ImGui::GetIO();
+    ImVec2 pos(U((float)Port_Setting("meter_x", 8)), U((float)Port_Setting("meter_y", 8)));
+    pos.x = std::clamp(pos.x, 0.0f, std::max(0.0f, io.DisplaySize.x - U(120)));
+    pos.y = std::clamp(pos.y, 0.0f, std::max(0.0f, io.DisplaySize.y - U(40)));
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Once);
     ImGui::SetNextWindowBgAlpha(0.6f);
-    if (ImGui::Begin("##meter", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+    if (ImGui::Begin("##meter", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                           ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings)) {
+        sMeterHover = ImGui::IsWindowHovered();
+        if (sMeterHover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) sMeterDrag = true;
+        if (sMeterDrag && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            ImVec2 at = ImGui::GetWindowPos();
+            Port_SettingSave("meter_x", (int)(at.x / sUiScale));
+            Port_SettingSave("meter_y", (int)(at.y / sUiScale));
+            Port_SettingsWrite();
+            sMeterDrag = false;
+        }
         // a fight shows 30 frames a second and the menus 60, as on the console; the speed is what should stay at 100%
-        ImGui::Text("%.0f fps   speed %.0f%%", sFps, sSpeed);
+        ImGui::Text("%.0f 帧/秒   速度 %.0f%%", sFps, sSpeed);
         if (Port_NetStats(n)) {
             if (n[0] >= 0) {
-                ImGui::Text("ping %d ms%s", n[0], Port_LobbyRelayed() ? " (relay)" : "");
+                ImGui::Text("延迟 %d 毫秒%s", n[0], Port_LobbyRelayed() ? "（中继）" : "");
             } else {
-                ImGui::TextUnformatted("ping ...");
+                ImGui::TextUnformatted("延迟 …");
             }
             if (n[5] > 0) {
-                ImGui::Text("rollbacks %d/s, %.1f frames", n[1], (float)n[2] / 10.0f);
+                ImGui::Text("回滚 %d 次/秒，%.1f 帧", n[1], (float)n[2] / 10.0f);
             } else {
-                ImGui::TextUnformatted("rollback off");
+                ImGui::TextUnformatted("回滚已关闭");
             }
-            ImGui::Text("waited %d ms/s (%d times)", n[4], n[3]);
+            ImGui::Text("等待 %d 毫秒/秒（%d 次）", n[4], n[3]);
             if (n[8] == 1) { // gs/net.c wait_end: input packets came, without the frame this copy needed
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  the other player's game is behind");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  对方游戏运行落后");
             } else if (n[8] == 2) { // nothing came for most of the wait
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  nothing arrived from the other player");
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "  未收到对方的数据");
             }
-            ImGui::Text("delay %d%s, rollback up to %d", n[6], n[7] ? " (auto)" : "", n[5]);
+            ImGui::Text("输入延迟 %d%s，最多回滚 %d 帧", n[6], n[7] ? "（自动）" : "", n[5]);
             if (n[9] != 0) { // the desync check found the two games apart (the match goes on)
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "desync since frame %d", n[9]);
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "从第 %d 帧起不同步", n[9]);
             }
         }
     }
@@ -2741,15 +2960,15 @@ static void chat_draw(void) {
         }
         const char *names[2] = {Port_NetName(Port_NetMe()), Port_NetName(!Port_NetMe())};
         if (sChat) {
-            ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.28f, 1.0f), "Chat (Tab)");
+            ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.28f, 1.0f), "聊天（Tab）");
             ImGui::SameLine();
             ImGui::TextDisabled("::");
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Drag anywhere to move the chat window. Click a line to copy it.");
+                ImGui::SetTooltip("拖动任意位置移动聊天窗口，点击一行复制文字。");
             }
             ImGui::SameLine(w - 70.0f);
             bool mute = PortChat_Muted() != 0;
-            if (ImGui::Checkbox("Mute", &mute)) {
+            if (ImGui::Checkbox("静音", &mute)) {
                 PortChat_MutedSet(mute);
                 sChatFocus = true;
             }
@@ -2771,7 +2990,7 @@ static void chat_draw(void) {
                     alpha = (float)(CHAT_SHOWN_MS - age) / (float)CHAT_FADE_MS;
                 }
             }
-            const char *sender = l.sender[0] != '\0' ? l.sender : (names[l.mine ? 0 : 1][0] != '\0' ? names[l.mine ? 0 : 1] : (l.mine ? "You" : "Rival"));
+            const char *sender = l.sender[0] != '\0' ? l.sender : (names[l.mine ? 0 : 1][0] != '\0' ? names[l.mine ? 0 : 1] : (l.mine ? "你" : "对手"));
             ImGui::PushID((int)i);
             ImVec4 nameCol = l.mine ? ImVec4(0.35f, 0.85f, 1.0f, alpha) : ImVec4(1.0f, 0.82f, 0.28f, alpha);
             ImGui::TextColored(nameCol, "%s:", sender);
@@ -2789,7 +3008,7 @@ static void chat_draw(void) {
                 static Uint64 sCopiedMs;
                 bool copied = sCopiedIdx == i + 1 && now - sCopiedMs < 1500;
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(copied ? "Copied" : "Click to copy");
+                    ImGui::SetTooltip(copied ? "已复制" : "点击复制");
                     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 16.0f) {
                         SDL_SetClipboardText(l.text);
                         sCopiedIdx = i + 1;
@@ -2822,7 +3041,7 @@ static void chat_draw(void) {
                     sChatFocus = true;
                 }
             }
-            ImGui::TextDisabled(sChatSoon ? "1 line/s: Enter to send" : "Enter: send   Esc/Tab: close   Ctrl+V: paste");
+            ImGui::TextDisabled(sChatSoon ? "每秒限一条：Enter 发送" : "Enter 发送   Esc/Tab 关闭   Ctrl+V 粘贴");
         }
     }
     ImGui::End();
@@ -2833,6 +3052,7 @@ static void chat_draw(void) {
 // Builds this frame's picture of the overlay (the settings or the online window, the line over the picture).
 // false: there is nothing to draw. The same for both back ends; each then draws ImGui's data its own way.
 static bool frame_build(void) {
+    PortWii_MouseFrame();
     PortInput_TboClipboard();
     { // a keypad of Tenkaichi Budokai Online takes text: the system's text input is on for it (letters as typed)
         static SDL_Window *on = NULL;
@@ -2868,6 +3088,11 @@ static bool frame_build(void) {
             }
         }
     }
+    if (sReady) {
+        int lobby = OnlineLobby::Tick(sOpen && sNet && sServerTab);
+        if (lobby == 1) { set_open(false); }
+        else if (lobby == 2) { net_open(); }
+    }
     update_tick();
     char updLine[256];
     update_line(updLine, sizeof(updLine)); // (the update's line over the main menu and the online screens)
@@ -2900,7 +3125,8 @@ static bool frame_build(void) {
     meter_count();
     sBuilt = false;
     bool upd = updLine[0] != '\0';
-    if (!sReady || (!sOpen && !sQuit && !notice && !overlay && !meter && !names && !bars && !chat && !banner && !saving && !watched && !upd)) {
+    bool titleNotice = sReady && !sOpen && !sQuit && Port_TitleNoticeVisible() && gUiPresentW > 0 && gUiPresentH > 0;
+    if (!sReady || (!sOpen && !sQuit && !notice && !overlay && !meter && !names && !bars && !chat && !banner && !saving && !watched && !upd && !titleNotice)) {
         return false;
     }
     if (sPadHold && sCapKind != 2) { // a binding was taken: the controller works the window again once nothing is held
@@ -2918,11 +3144,7 @@ static bool frame_build(void) {
     }
     // (the button that becomes the binding would also press the row it is bound in; while a chat line is typed the
     // controller is the game's)
-    if (sPadHold || (sChat && !sOpen)) {
-        ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-    } else {
-        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-    }
+    gamepad_navigation();
     sBuilt = true;
     if (sGL) {
         ImGui_ImplOpenGL3_NewFrame();
@@ -2933,10 +3155,11 @@ static bool frame_build(void) {
     ui_scale_apply(); // (the window's size is known from here)
     fonts_apply(); // (a face chosen for the fight panels, between two frames)
     ImGui::NewFrame();
+    if (titleNotice) { title_notice_draw(); }
     // The mouse pointer is hidden over the game's picture and shown with a window of this file that takes the mouse:
     // the settings, the online windows, the question before the game closes, a chat line being typed (setting
     // hide_pointer, on unless 0). The SDL back end hides it for this cursor at the next frame.
-    if (!sOpen && !sQuit && !sChat && Port_Setting("hide_pointer", 1) != 0) {
+    if (!sOpen && !sQuit && !sChat && !sMeterHover && !sMeterDrag && Port_Setting("hide_pointer", 1) != 0) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_None);
     }
     if (bars) {

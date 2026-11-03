@@ -1,0 +1,27 @@
+{
+    admin off
+    default_sni 114.132.102.42
+    auto_https off
+    persist_config off
+    servers {
+        protocols h1
+    }
+}
+https://114.132.102.42:2626 {
+    bind 0.0.0.0
+    tls "@@ROOT@@/config/tls-ip2626/server.crt" "@@ROOT@@/config/tls-ip2626/server.key"
+    request_body {
+        max_size 8KB
+    }
+    @directory path /directory/v1/request
+    handle @directory {
+        reverse_proxy 127.0.0.1:8788 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8787 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}

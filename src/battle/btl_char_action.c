@@ -1164,6 +1164,9 @@ void BtlAct_UpdateTimers(BtlActChr *chr) {
 void BtlAct_Update(BtlActChr *chr) {
     BtlActState *act = &chr->act;
     BtlActHandler *tbl = gBtlActHandlers;
+#ifdef PORT
+    s32 trunksFlight = 0;
+#endif
 
     BtlChar_SetStage(chr, 4);
     if (tbl[act->current] != NULL) {
@@ -1175,9 +1178,19 @@ void BtlAct_Update(BtlActChr *chr) {
             tbl[act->current](chr, BTLACT_PHASE_LEAVE);
         }
         BtlChar_ApplyRootYaw(chr);
+#ifdef PORT
+        /* Keep only the specific rush-exit delay when stick movement changes action. */
+        if ((act->current == 0xB || act->current == 0xD || act->current == 0xE) &&
+            (act->request == 0xB || act->request == 0xD || act->request == 0xE)) {
+            trunksFlight = chr->work[19];
+        }
+#endif
         act->current = act->request;
         act->request = -1;
         memset(chr->work, 0, sizeof(chr->work));
+#ifdef PORT
+        chr->work[19] = trunksFlight;
+#endif
         chr->actionFrame = 0;
         chr->unkD78 = 0;
         chr->unkD7C = 0;

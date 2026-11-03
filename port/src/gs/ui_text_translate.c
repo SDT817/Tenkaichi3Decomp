@@ -343,6 +343,35 @@ static int ui_prepare(void) {
     qsort(sOwn, (size_t)sOwnCount, sizeof(*sOwn), ui_ptr_compare);
     return 1;
 }
+/* Five skill spans absent from the shipped CN8 catalog. Catalog edits take priority.
+   Added through the existing allocator/hash index so online snapshots and font residency are unchanged. */
+static int ui_zh_missing_skills(const char *locale) {
+    static const char *const terms[][2] = {
+        {"Give me energy!", ""}, /* 大家分点元气给我吧！ */
+        {"I'm Getting Excited!", ""}, /* 我都兴奋起来了！ */
+        {"x20 Kaiken Kamehameha", ""}, /* ２０倍界王拳龟派气功 */
+        {"Meteor Combination", ""}, /* 流星组合技 */
+        {"Expanding Energy Wave", ""}, /* 扩散能量波 */
+    };
+    unsigned i;
+    if (strcmp(locale, "zh-CN")) return 1;
+    for (i = 0; i < sizeof(terms)/sizeof(terms[0]); i++) {
+        uint16_t *a = ui_utf16(terms[i][0], 0), *b;
+        char id[64], *copy;
+        int j;
+        if (!a) return 0;
+        for (j = 0; j < sRowCount && !ui_equal(sRows[j]->original, a); j++) { }
+        if (j != sRowCount) { free(a); continue; }
+        snprintf(id, sizeof(id), "local/skill-missing/%u", i);
+        copy = malloc(strlen(id)+1);
+        b = ui_utf16(terms[i][1], 1);
+        if (copy) strcpy(copy, id);
+        if (!copy || !b || !ui_add_row(copy, a, b)) {
+            free(copy); free(a); ui_translated_free(b); return 0;
+        }
+    }
+    return 1;
+}
 int UiText_Load(const char *gameTextDir, const char *locale) {
     char path[1200], *data;
     FILE *fp;
@@ -361,7 +390,7 @@ int UiText_Load(const char *gameTextDir, const char *locale) {
     ui_clear();
     sRows = calloc(UI_MAX_ROWS, sizeof(*sRows));
     sGroups = calloc(UI_MAX_GROUPS, sizeof(*sGroups));
-    ok = sRows && sGroups && ui_parse(data, (size_t)n, locale) && ui_prepare();
+    ok = sRows && sGroups && ui_parse(data, (size_t)n, locale) && ui_zh_missing_skills(locale) && ui_prepare();
     free(data);
     if (!ok) { ui_clear(); fprintf(stderr, "bt3: invalid UI translation catalog: %s\n", path); return 0; }
     if (sOwnCount == 0) { ui_clear(); return 1; }
@@ -380,6 +409,51 @@ const uint16_t *UiText_TranslateString(const uint16_t *original) {
     while (sWords[slot].original && !ui_equal(sWords[slot].original, original)) slot = (slot + 1) & (UI_WORD_SLOTS - 1);
     w = &sWords[slot];
     return w->original && !w->ambiguous && w->translated ? w->translated : original;
+}
+/* A skill can have the same name but a different following condition.
+   Prefer an exact two-line catalog entry, then the ordinary one-line span. */
+static const uint16_t *ui_span_text(const uint16_t *original, int length, uint64_t h) {
+    unsigned slot;
+    int i;
+    UiWord *w;
+    h = ui_hash_char(h, 0);
+    slot = (unsigned)h & (UI_WORD_SLOTS - 1);
+    while ((w = &sWords[slot])->original) {
+        if (w->hash == h) {
+            for (i = 0; i < length && w->original[i + 1] == original[i]; i++) { }
+            if (i == length && !w->original[length + 1]) {
+                return !w->ambiguous ? w->translated : NULL;
+            }
+        }
+        slot = (slot + 1) & (UI_WORD_SLOTS - 1);
+    }
+    return NULL;
+}
+const uint16_t *UiText_TranslateSpan(const uint16_t *original) {
+    uint64_t h = UINT64_C(1469598103934665603), contextHash;
+    int length, contextLength;
+    const uint16_t *translated;
+    if (!__atomic_load_n(&sReady, __ATOMIC_ACQUIRE) || !original) return original;
+    if (*original == 0xfeff) return UiText_TranslateString(original);
+    h = ui_hash_char(h, 0xfeff);
+    for (length = 0; length < UI_MAX_UNITS - 2; length++) {
+        uint16_t c = original[length];
+        if (!c || c == '\n' || c == '\r') break;
+        h = ui_hash_char(h, c);
+    }
+    if (length == 0 || length == UI_MAX_UNITS - 2) return original;
+    if (original[length] == '\n') {
+        contextHash = ui_hash_char(h, '\n');
+        for (contextLength = length + 1; contextLength < UI_MAX_UNITS - 2; contextLength++) {
+            uint16_t c = original[contextLength];
+            if (!c || c == '\n' || c == '\r') break;
+            contextHash = ui_hash_char(contextHash, c);
+        }
+        if (contextLength < UI_MAX_UNITS - 2 &&
+            (translated = ui_span_text(original, contextLength, contextHash))) return translated;
+    }
+    translated = ui_span_text(original, length, h);
+    return translated ? translated : original;
 }
 const uint16_t *UiText_TranslateLine(const uint32_t *table, int line, const uint16_t *original) {
     uint32_t count, i;

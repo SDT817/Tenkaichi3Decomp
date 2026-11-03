@@ -10,7 +10,7 @@
  *   player 2   second controller, no keys
  *   controller the usual layout (south = cross, east = circle, west = square, north = triangle, triggers = L2 / R2)
  * The sticks of a controller are passed through, or given a round deadzone first (stick_bytes, below). The pressure
- * bytes of the buffer are left at zero. The game's motor commands go to the player's controller (Port_PadVibrate).
+ * bytes are zero except for the control layout in the last byte. Motor commands go to the player's controller.
  */
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -20,6 +20,8 @@
 #include <string.h>
 #include "gs_internal.h"
 #include "ui.h"
+#include "control_bindings.h"
+#include "../../include/port_control_mode.h"
 
 int gPortOverlayOpen, gPortInputCapture, gPortChatTyping;
 extern int Port_Setting(const char *name, int def); /* plat_settings.c */
@@ -54,7 +56,9 @@ static const struct { const char *name, *label; unsigned bit; int key; int pad; 
     {"rs_left", "Right stick left", 0, 0, -1}, {"rs_right", "Right stick right", 0, 0, -1},
 };
 
-static int sKeys[2][PORT_ACTIONS], sPadBtn[2][PORT_PAD_BUTTONS], sPadSlot[2];
+static int sKeys[2][PORT_ACTIONS], sWiiKeys[2][PORT_ACTIONS], sPadBtn[2][PORT_PAD_BUTTONS], sPadSlot[2];
+static int sControlMode[2]; /* 0 PS2, 1 Wii */
+static int sControlSplit[2];
 /* Per player: the deadzone of the left and of the right stick (-1 = the game's own, as the pad's bytes always were
    passed; 0..PORT_DEADZONE_MAX = a round one of that many percent, stick_bytes below), and vibration (on, strength
    in percent). */
@@ -71,8 +75,10 @@ static pthread_once_t sLoadOnce = PTHREAD_ONCE_INIT;
 
 static void defaults(int player) {
     int a;
+    int *keys = sControlMode[player] ? sWiiKeys[player] : sKeys[player];
+
     for (a = 0; a < PORT_ACTIONS; a++) {
-        sKeys[player][a] = player == 0 ? kActions[a].key : 0;
+        keys[a] = player == 0 ? kActions[a].key : 0;
         if (a < PORT_PAD_BUTTONS) {
             sPadBtn[player][a] = kActions[a].pad;
         }
@@ -96,6 +102,9 @@ static void load(void) {
         for (a = 0; a < PORT_ACTIONS; a++) {
             snprintf(name, sizeof(name), "key_p%d_%s", p + 1, kActions[a].name);
             sKeys[p][a] = Port_Setting(name, sKeys[p][a]);
+            /* Start a new Wii profile with the existing keys, then keep it separate. */
+            snprintf(name, sizeof(name), "key_wii_p%d_%s", p + 1, kActions[a].name);
+            sWiiKeys[p][a] = Port_Setting(name, sKeys[p][a]);
             if (a < PORT_PAD_BUTTONS) {
                 snprintf(name, sizeof(name), "pad_p%d_%s", p + 1, kActions[a].name);
                 sPadBtn[p][a] = Port_Setting(name, sPadBtn[p][a]);
@@ -103,6 +112,11 @@ static void load(void) {
         }
         snprintf(name, sizeof(name), "padslot_p%d", p + 1);
         sPadSlot[p] = Port_Setting(name, sPadSlot[p]);
+        snprintf(name, sizeof(name), "control_mode_p%d", p + 1);
+        sControlMode[p] = Port_Setting(name, 0) == 1;
+        snprintf(name, sizeof(name), "control_split_p%d", p + 1);
+        sControlSplit[p] = Port_Setting(name, 0) == 1;
+        PortWii_Init(p, sWiiKeys[p], sPadBtn[p]);
         if (p == 1 && getenv("BT3_PAD_SHARED") != NULL) {
             sPadSlot[p] = 0; /* overrides the saved setting too */
         }
@@ -120,10 +134,24 @@ static void load(void) {
     sChatKey = Port_Setting("key_chat", SDL_SCANCODE_TAB);
 }
 
-const char *PortInput_ActionLabel(int action) { return kActions[action].label; }
-int *PortInput_Keys(int player) { pthread_once(&sLoadOnce, load); return sKeys[player]; }
+const char *PortInput_ActionLabel(int player, int action) {
+    static const char *const wii[PORT_ACTIONS] = {
+        "D-pad up", "D-pad down", "D-pad left", "D-pad right",
+        "Flight", "Guard", "Attack", "Ki blast",
+        "Descend", "Ascend", "Fast descend", "Fast ascend",
+        "L3", "Charge ki", "START", "SELECT",
+        "Left stick up", "Left stick down", "Left stick left", "Left stick right",
+        "Tag", "Transform", "Camera left", "Camera right"
+    };
+
+    pthread_once(&sLoadOnce, load);
+    return sControlMode[player] ? wii[action] : kActions[action].label;
+}
+int *PortInput_Keys(int player) { pthread_once(&sLoadOnce, load); return sControlMode[player] ? sWiiKeys[player] : sKeys[player]; }
 int *PortInput_PadButtons(int player) { pthread_once(&sLoadOnce, load); return sPadBtn[player]; }
 int *PortInput_PadSlot(int player) { pthread_once(&sLoadOnce, load); return &sPadSlot[player]; }
+int *PortInput_ControlMode(int player) { pthread_once(&sLoadOnce, load); return &sControlMode[player]; }
+int *PortInput_ControlSplit(int player) { pthread_once(&sLoadOnce, load); return &sControlSplit[player]; }
 int *PortInput_Deadzone(int player) { pthread_once(&sLoadOnce, load); return sDeadzone[player]; }
 int *PortInput_Vibration(int player) { pthread_once(&sLoadOnce, load); return sVib[player]; }
 int *PortInput_OverlayKey(void) { pthread_once(&sLoadOnce, load); return &sOverlayKey; }
@@ -352,7 +380,17 @@ int PortInput_TboEvent(const SDL_Event *ev) {
     return ev->type == SDL_EVENT_KEY_UP && typing_key(ev->key.scancode);
 }
 int *PortInput_ChatKey(void) { pthread_once(&sLoadOnce, load); return &sChatKey; }
-void PortInput_ResetDefaults(int player) { pthread_once(&sLoadOnce, load); defaults(player); }
+void PortInput_ResetDefaults(int player) {
+    int pads[PORT_PAD_BUTTONS], base[PORT_PAD_BUTTONS], a;
+    pthread_once(&sLoadOnce, load);
+    memcpy(pads, sPadBtn[player], sizeof(pads));
+    defaults(player);
+    if (sControlMode[player]) {
+        memcpy(sPadBtn[player], pads, sizeof(pads));
+        for (a = 0; a < PORT_PAD_BUTTONS; a++) { base[a] = kActions[a].pad; }
+        PortWii_Reset(player, sControlSplit[player], sWiiKeys[player], base);
+    }
+}
 
 void PortInput_Save(void) {
     char name[32];
@@ -361,6 +399,8 @@ void PortInput_Save(void) {
         for (a = 0; a < PORT_ACTIONS; a++) {
             snprintf(name, sizeof(name), "key_p%d_%s", p + 1, kActions[a].name);
             Port_SettingSave(name, sKeys[p][a]);
+            snprintf(name, sizeof(name), "key_wii_p%d_%s", p + 1, kActions[a].name);
+            Port_SettingSave(name, sWiiKeys[p][a]);
             if (a < PORT_PAD_BUTTONS) {
                 snprintf(name, sizeof(name), "pad_p%d_%s", p + 1, kActions[a].name);
                 Port_SettingSave(name, sPadBtn[p][a]);
@@ -368,6 +408,10 @@ void PortInput_Save(void) {
         }
         snprintf(name, sizeof(name), "padslot_p%d", p + 1);
         Port_SettingSave(name, sPadSlot[p]);
+        snprintf(name, sizeof(name), "control_mode_p%d", p + 1);
+        Port_SettingSave(name, sControlMode[p]);
+        snprintf(name, sizeof(name), "control_split_p%d", p + 1);
+        Port_SettingSave(name, sControlSplit[p]);
         for (a = 0; a < 2; a++) {
             snprintf(name, sizeof(name), "deadzone_p%d_%s", p + 1, a == 0 ? "ls" : "rs");
             Port_SettingSave(name, sDeadzone[p][a]);
@@ -381,6 +425,7 @@ void PortInput_Save(void) {
     Port_SettingSave("pad_overlay", sOverlayPad);
     Port_SettingSave("key_chat", sChatKey);
     Port_SettingsWrite();
+    PortWii_Save();
 }
 
 /* Testing without a controller or a person. BT3_STICK_TEST="lx,ly,rx,ry[,lt,rt]" (the sticks -32768..32767, + =
@@ -503,6 +548,24 @@ static SDL_Gamepad *pad_of(int player) {
         }
     }
     return NULL;
+}
+
+/* The settings window reads the controller directly; binding capture keeps the physical buttons. */
+int PortInput_UiButton(SDL_Gamepad *gamepad, int button) {
+    int p;
+
+    pthread_once(&sLoadOnce, load);
+    for (p = 0; gamepad != NULL && p < 2; p++) {
+        if (sPadSlot[p] >= 0 && sPadSlot[p] < sIdCount && sIds[sPadSlot[p]] == SDL_GetGamepadID(gamepad)) {
+            if (sControlMode[p]) {
+                if (button == SDL_GAMEPAD_BUTTON_SOUTH) { return SDL_GAMEPAD_BUTTON_WEST; }
+                if (button == SDL_GAMEPAD_BUTTON_EAST) { return SDL_GAMEPAD_BUTTON_SOUTH; }
+                if (button == SDL_GAMEPAD_BUTTON_WEST) { return SDL_GAMEPAD_BUTTON_EAST; }
+            }
+            break;
+        }
+    }
+    return button;
 }
 
 /* BT3_PAD="frame:button,frame:button,...": scripted presses for player 1, each held for 4 frames from that frame
@@ -1038,7 +1101,7 @@ int Port_PadRead(int socket, unsigned char *data) {
     }
     /* (the settings window is worked with the controller too while it is open: nothing of it for the game) */
     g = gPortInputCapture || gPortOverlayOpen || sSwallow ? NULL : pad_of(socket);
-    if (g != NULL) {
+    if (g != NULL && !sControlMode[socket]) {
         for (a = 0; a < PORT_PAD_BUTTONS; a++) {
             int src = sPadBtn[socket][a];
             if (src == PORT_PAD_LT ? SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > PORT_TRIGGER_AT :
@@ -1054,17 +1117,22 @@ int Port_PadRead(int socket, unsigned char *data) {
         const bool *ks = SDL_GetKeyboardState(NULL);
         int p, held = 0;
         for (p = 0; p < 2; p++) {
+            if (sControlMode[p]) {
+                held = held || PortWii_KeysHeld(p, sControlSplit[p], ks);
+                continue;
+            }
+            const int *keys = sControlMode[p] ? sWiiKeys[p] : sKeys[p];
             for (a = 0; a < PORT_ACTIONS; a++) {
-                held = held || (sKeys[p][a] > 0 && sKeys[p][a] < SDL_SCANCODE_COUNT && ks[sKeys[p][a]]);
+                held = held || (keys[a] > 0 && keys[a] < SDL_SCANCODE_COUNT && ks[keys[a]]);
             }
         }
         sKeySwallow = held;
     }
     /* the settings window takes the keyboard while it is open, and the online chat while a line is typed (the
        controller still plays then) */
-    if (!gPortOverlayOpen && !gPortChatTyping && !sKeySwallow) {
+    if (!sControlMode[socket] && !gPortOverlayOpen && !gPortChatTyping && !sKeySwallow) {
         const bool *ks = SDL_GetKeyboardState(NULL);
-        const int *k = sKeys[socket];
+        const int *k = sControlMode[socket] ? sWiiKeys[socket] : sKeys[socket];
         for (a = 0; a < PORT_PAD_BUTTONS; a++) {
             if (k[a] > 0 && k[a] < SDL_SCANCODE_COUNT && ks[k[a]] && !(gPortTboTyping && typing_key(k[a]))) {
                 btn |= kActions[a].bit;
@@ -1080,6 +1148,30 @@ int Port_PadRead(int socket, unsigned char *data) {
         if (HELD(22)) { rx = 0x00; }
         if (HELD(23)) { rx = 0xFF; }
 #undef HELD
+    }
+    unsigned char extra = 0;
+    if (sControlMode[socket]) {
+        float values[PORT_WII_ACTIONS];
+        unsigned char sticks[4] = {128, 128, 128, 128};
+        const bool *keys = !gPortOverlayOpen && !gPortChatTyping && !sKeySwallow && !gPortInputCapture ? SDL_GetKeyboardState(NULL) : NULL;
+        int split = sControlSplit[socket];
+        if (g != NULL) {
+            stick_bytes(sDeadzone[socket][0], SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), &sticks[0], &sticks[1]);
+            stick_bytes(sDeadzone[socket][1], SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX), SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY), &sticks[2], &sticks[3]);
+        }
+        PortWii_Read(socket, split, g, keys, sticks, gPortTboTyping ? typing_key : NULL, values);
+        for (a = 0; a < PORT_PAD_BUTTONS; a++) {
+            if (values[a] > 0.5f) { btn |= kActions[a].bit; }
+        }
+        lx = (unsigned char)(128 + 127 * values[19] - 128 * values[18]);
+        ly = (unsigned char)(128 + 127 * values[17] - 128 * values[16]);
+        rx = (unsigned char)(128 + 127 * values[23] - 128 * values[22]);
+        ry = (unsigned char)(128 + 127 * values[21] - 128 * values[20]);
+        if (split) {
+            if (values[24] > 0.5f) { extra |= PORT_CONTROL_PREV; }
+            if (values[25] > 0.5f) { extra |= PORT_CONTROL_NEXT; }
+            if (values[26] > 0.5f) { extra |= PORT_CONTROL_BURST; }
+        }
     }
     if (socket == 0) {
         btn |= script_buttons();
@@ -1112,5 +1204,7 @@ int Port_PadRead(int socket, unsigned char *data) {
     data[0] = (unsigned char)(~btn & 0xFF);       /* active low */
     data[1] = (unsigned char)(~(btn >> 8) & 0xFF);
     data[2] = rx; data[3] = ry; data[4] = lx; data[5] = ly;
+    data[PORT_CONTROL_EXTRA_BYTE] = extra;
+    data[PORT_CONTROL_MODE_BYTE] = sControlMode[socket] ? sControlSplit[socket] ? PORT_CONTROL_MODE_SPLIT : PORT_CONTROL_MODE_WII : 0;
     return 18;
 }

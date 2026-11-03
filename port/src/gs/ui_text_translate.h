@@ -7,5 +7,7 @@ int UiText_Load(const char *gameTextDir, const char *locale);
 /* Exact table and line lookup, with an unambiguous string lookup for other font calls. */
 const uint16_t *UiText_TranslateLine(const uint32_t *table, int line, const uint16_t *original);
 const uint16_t *UiText_TranslateString(const uint16_t *original);
+/* Display text inside a skill script, ending at a line break (without a BOM). */
+const uint16_t *UiText_TranslateSpan(const uint16_t *original);
 
 #endif

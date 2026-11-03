@@ -25,7 +25,8 @@
 #include "gs_draw.h"
 #include "ui.h"         /* PortVideo and the window helpers */
 #include "gs_texpack.h" /* texture packs (replacement textures) */
-#include "menu_text.h"  /* editable labels in the original menu texture slots */
+#include "menu_text.h"
+#include "perf_trace.h"  /* editable labels in the original menu texture slots */
 #include "menu_labels.h"      /* European menu art and native language selector pictures */
 #include <math.h>
 
@@ -148,6 +149,7 @@ unsigned gDrawNewTex, gDrawImgMade, gDrawImgFreed, gDrawImgPooled; /* (the last 
 int gDrawLogged; /* the picture's line is written (Smooth motion's other pictures of the list are not) */
 
 void GsGpu_ListStart(void) {
+    PerfTrace_Begin();
     gDrawStartNs = SDL_GetTicksNS(); /* (gs_gpu.c's clock, where it is compared) */
     gDrawTexNs = gDrawPipeNs = gDrawUpBytes = gDrawImgNs = gDrawLookNs = gDrawVuNs = gDrawXferNs = 0;
     gDrawNewTex = gDrawImgMade = gDrawImgFreed = gDrawImgPooled = 0;
@@ -172,6 +174,7 @@ typedef struct Tex {
     uint32_t amax;           /* and the largest alpha byte of the original */
     int pack;                /* a texture pack's replacement still being read (gs_texpack.c), or -1 */
     uint32_t packAlpha;      /* and the amax it will have */
+    uint64_t glyphAtlas; /* exact shared-font pixels, independently of unused GS pages */
 } Tex;
 static Tex sTex[MAX_TEX];
 static uint16_t sTexBucket[TEX_BUCKETS]; /* index + 1 of a cache entry, 0 = empty (open addressing) */
@@ -183,6 +186,13 @@ static Tex *sLast; /* the entry the previous lookup returned */
    through the glare's ramp, every pixel of the stage as if it glowed: a white picture, seen by a player.) */
 static struct { uint32_t hash, last; GsTex tex; } sCluts[MAX_CLUTS];
 static uint32_t sClutPx[MAX_CLUTS][256]; /* (apart: the slots the lookup goes through stay together) */
+
+/* Non-owning aliases: the ordinary texture cache keeps the one GPU image alive. Compaction clears these. */
+typedef struct GlyphAlias {
+    uint64_t tex0, texa, atlas;
+    uint32_t gen, owner; /* index + 1 in sTex */
+} GlyphAlias;
+static GlyphAlias sGlyphAliases[256];
 
 static uint32_t tex_bucket(uint64_t t0, uint64_t texa, uint32_t gen) {
     uint64_t h = (t0 ^ (texa * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)gen << 17)) * 0xD6E8FEB86659FD93ull;
@@ -482,6 +492,7 @@ static void pack_arrived(Tex *c) {
     old[oldHead & 255].tex = c->tex;
     old[oldHead++ & 255].frame = gGsFrame;
     c->tex = tex;
+    c->glyphAtlas = 0;
     c->replaced = 1;
     c->rw = pack.w;
     c->rh = pack.h;
@@ -592,7 +603,7 @@ static GsTex texture_get(int ctx) {
     uint32_t cbp = (t0 >> 37) & 0x3FFF, cpsm = (t0 >> 51) & 15;
     uint32_t bits = (uint32_t)Gs_PsmBits(psm), gen = 0, pages, i, x, y, *px;
     Tex *t;
-    uint64_t tex_t0;
+    uint64_t tex_t0, glyphAtlas = 0;
     TexPackImage pack;
     uint32_t packMaxAlpha = 255, rw = tw, rh = th;
     int replaced = 0, menuText = 0, sharedText = 0, battleText = 0, packWait = -1;
@@ -621,6 +632,13 @@ static GsTex texture_get(int ctx) {
         }
         sLast->last = gGsFrame;
         return sLast->tex; /* the common case: the same texture as the previous primitive */
+    }
+    {
+        GlyphAlias *a = &sGlyphAliases[tex_bucket(t0, texa, gen) & 255];
+        if (a->owner && a->owner <= (unsigned)gsTexCount && a->tex0 == t0 && a->texa == texa && a->gen == gen) {
+            Tex *c = &sTex[a->owner - 1];
+            if (c->glyphAtlas == a->atlas && c->pack < 0) { c->last = gGsFrame; sLast = c; return c->tex; }
+        }
     }
     {
         uint32_t h = tex_bucket(t0, texa, gen);
@@ -655,6 +673,7 @@ static GsTex texture_get(int ctx) {
             gsTexCount = n;
         }
         sLast = NULL;
+        memset(sGlyphAliases, 0, sizeof(sGlyphAliases));
         memset(sTexBucket, 0, sizeof(sTexBucket));
         for (i = 0; i < (uint32_t)gsTexCount; i++) {
             uint32_t h = tex_bucket(sTex[i].tex0, sTex[i].texa, sTex[i].gen);
@@ -704,9 +723,6 @@ static GsTex texture_get(int ctx) {
             tex_decode(&d);
         }
     }
-    if (px != NULL && !replaced && bits <= 8) {
-        MenuLabels_ArtSwap((unsigned char *)px, (int)tw, (int)th); /* the European picture, in the chosen language */
-    }
     if (px != NULL) {
         MenuText_NewTexture(); /* (its label hash is worked out once, for this check and MenuText_Render below) */
         battleText = MenuText_IsBattleTexture((const uint8_t *)px, (int)tw, (int)th, bits <= 8);
@@ -719,14 +735,35 @@ static GsTex texture_get(int ctx) {
         int mw, mh;
         uint64_t font_t0 = gpu_now();
         int textScale = MenuText_RasterScale(SCALE);
-        uint8_t *text = MenuText_RenderGlyphs((uint8_t *)px, (int)tw, (int)th, (int)tbp, (int)cbp, textScale, &mw, &mh);
+        uint8_t *text;
+        if (packWait < 0) {
+            glyphAtlas = MenuText_GlyphAtlasId((uint8_t *)px, (int)tw, (int)th, (int)tbp, (int)cbp, textScale);
+            for (i = 0; glyphAtlas && i < (unsigned)gsTexCount; i++) {
+                Tex *c = &sTex[i];
+                if (c->glyphAtlas == glyphAtlas && c->pack < 0 && c->battleText == battleText && c->ow == tw && c->oh == th) {
+                    GlyphAlias *a = &sGlyphAliases[tex_bucket(t0, texa, gen) & 255];
+                    *a = (GlyphAlias){t0, texa, glyphAtlas, gen, i + 1};
+                    c->last = gGsFrame; sLast = c;
+                    free(px);
+                    gGpuTexNs += gpu_now() - tex_t0;
+                    gDrawTexNs += gpu_now() - tex_t0;
+                    gDrawNewTex++;
+                    return c->tex;
+                }
+            }
+        }
+        text = MenuText_RenderGlyphs((uint8_t *)px, (int)tw, (int)th, (int)tbp, (int)cbp, textScale, &mw, &mh);
         sharedText = text != NULL;
+        if (sharedText) { glyphAtlas = MenuText_GlyphAtlasId((uint8_t *)px, (int)tw, (int)th, (int)tbp, (int)cbp, textScale); }
         if (text == NULL) { text = MenuText_Render((uint8_t *)px, (int)tw, (int)th, bits <= 8, textScale, &mw, &mh); }
         if (text != NULL) {
             free(px);
             px = (uint32_t *)text;
             rw = (uint32_t)mw; rh = (uint32_t)mh;
             menuText = 1;
+        } else if (bits <= 8) {
+            /* Catalog labels identify the disc's pixels; foreign artwork is the fallback. */
+            MenuLabels_ArtSwap((unsigned char *)px, (int)tw, (int)th);
         }
         if (getenv("BT3_FONT_LOG") != NULL) { /* what a font setting costs: every decoded texture, and the time the text took */
             fprintf(stderr, "font: frame %u: %ux%u %s %.3f ms\n", gGsFrame, (unsigned)tw, (unsigned)th, text != NULL ? "drawn" : "left",
@@ -780,6 +817,7 @@ static GsTex texture_get(int ctx) {
     t->amax = replaced ? packMaxAlpha : 255u;
     t->pack = packWait;
     t->packAlpha = packMaxAlpha;
+    t->glyphAtlas = sharedText ? glyphAtlas : 0;
     return t->tex;
 }
 
@@ -1108,8 +1146,11 @@ static int draw_state(int ctx, int topo, int sprite, int vu, GsDraw *d, float *u
                 kept = 1;
             }
         }
-        /* a frame buffer used as a texture: only if nothing was uploaded over it since it was drawn */
-        if (src >= 0 && (kept || ((t0 & 0x1F) == 0 && gsTargets[src].cleared && gsTargets[src].gen == gGsPageGen[gsTargets[src].fbp & 511]))) {
+        /* A buffer written earlier in this list is ready to sample too: the back end only sets
+           cleared when it replays the list. Otherwise the first blur reads old VRAM textures.
+           Keep the upload-generation check, and leave the back end to clear new attachments. */
+        if (src >= 0 && (kept || ((t0 & 0x1F) == 0 && (gsTargets[src].cleared || gsTargets[src].draws) &&
+                                  gsTargets[src].gen == gGsPageGen[gsTargets[src].fbp & 511]))) {
             uint32_t tp = (uint32_t)((t0 >> 20) & 0x3F);
             if (gsTargets[src].stale) {
                 /* The buffer was meant to hold a copy or a step of an effect that was dropped; what it holds now
@@ -1993,6 +2034,7 @@ static void menu_labels_apply(void) {
     extern int Port_NetSession(void); /* net.c */
     if (!Port_NetSession()) {
         MenuText_Poll();
+        if (gPortMenuMode) { MenuText_WarmGlyphs(MenuText_RasterScale(SCALE)); }
     }
 }
 

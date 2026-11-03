@@ -47,7 +47,8 @@ int MenuLabels_MainItem(const char *dataDir, unsigned char *out[2]);
    labels (which finds the sheet by its pixels) both use this, so the two agree. */
 void MenuLabels_ItemPixels(const unsigned char *pic, const unsigned char *table, unsigned char *out);
 
-/* The European disc's menu art in another language: `bank` 1 Spanish, 2 German, 3 French, 4 Italian. The setup
+/* The European disc's menu art in another language: `bank` 1 Spanish, 2 German, 3 French, 4 Italian.
+   Bank 5 reads curated local Chinese menus from game-text/art/zh-CN, without the battle HUD. The setup
    (or port/tools/extract_eu.py) has put the European disc's menu and HUD archives into `dataDir`/pzs3eu1; every
    texture file of them that the language paints otherwise is paired with the USA one in `dataDir`/pzs3us1 by the
    hash of the decoded USA pixels, the one the renderer sees. Returns how many textures, or -1 (`why` says why);

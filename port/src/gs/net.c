@@ -2286,6 +2286,8 @@ const char *Port_NetName(int player) {
    and with this their own gauges are on the left, as the host's are for the host. Setting net_hud_own (on by
    default); BT3_HUD_SWAP=1 the same without a connection, for looking at it. Only this copy's picture changes. */
 int Port_HudSwap(void) {
+    extern int Port_OnlineSplitView(void), Port_OnlineSplitSwap(void);
+    if (Port_NetActive() && Port_OnlineSplitView()) return Port_OnlineSplitSwap();
     static int forced = -1, pref = -1;
     extern int Port_Setting(const char *name, int def);
     if (forced < 0) {
@@ -2938,7 +2940,11 @@ unsigned Port_NetTick(void) {
    otherwise (the two views side by side, as always). BT3_VIEW=0|1: the same without a connection, for looking at
    it and for comparing the game's state between the three ways of showing a battle. */
 int Port_NetView(void) {
+    extern int Port_OnlineSplitView(void); /* private lobby: the original local-versus two views */
     static int forced = -2;
+    if (Port_NetActive() && Port_OnlineSplitView()) {
+        return -1;
+    }
     if (forced == -2) {
         const char *e = getenv("BT3_VIEW");
         forced = e != NULL ? atoi(e) : -1;

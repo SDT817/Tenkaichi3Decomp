@@ -736,6 +736,7 @@ typedef struct MenuLabel {
     unsigned top, bottom, middleColor, outline, outlineBottom, bevelLight, bevelDark;
     int italic;
     int outlineMilli, outerMilli, shadow, bevelMilli, depthMilli, midGradient, fontFace, hasMiddle;
+    int warmMain;
     unsigned outerColor;
     char text[256];
 } MenuLabel;
@@ -757,12 +758,14 @@ static struct { int width, height; } sSizes[32]; /* the sizes of the textures th
 static int sSizeCount;
 static struct RowCache { int label, scale; unsigned used; Row row; } sRows[ROW_CACHE_MAX];
 static unsigned sRowBytes, sRowClock;
+static int sWarmMainRow, sWarmMainScale;
 
 static void rows_clear(void) {
     int i;
     for (i = 0; i < ROW_CACHE_MAX; i++) { free(sRows[i].row.px); }
     memset(sRows, 0, sizeof(sRows));
     sRowBytes = 0;
+    sWarmMainRow = sWarmMainScale = 0;
 }
 
 static void menu_text_name_styles(const char *dir) {
@@ -872,6 +875,8 @@ static void menu_text_labels(void) {
         label.hash = (uint64_t)hash;
         if (pieces == 2 && (label.rowHeight / 2 <= 8 || sCount + 2 > MENU_TEXT_MAX)) continue;
         if (pieces == 1 && strcmp(translated, original) != 0) label.artWidth = 0;
+        label.warmMain = strncmp(id, "main-5/", 7) == 0 || strncmp(id, "main-6/", 7) == 0 ||
+                         strncmp(id, "main-heading/", 13) == 0;
         for (partIndex = 0; partIndex < pieces; partIndex++) {
             const char *part = partIndex == 0 ? translated : newline + 1;
             size_t length = partIndex == 0 && newline != NULL ? (size_t)(newline - translated) : strlen(part);
@@ -1183,8 +1188,14 @@ static void art_start(void) {
     started = 1;
     for (k = 0; k < 4 && strcmp(locale, kBanks[k]) != 0; k++) {
     }
-    snprintf(path, sizeof(path), "%s/pzs3eu1/00005.bin", sDataDir);
-    if (k == 4 || !file_there(path)) {
+    if (strcmp(locale, "zh-CN") == 0) {
+        k = 4;
+        snprintf(path, sizeof(path), "%s/game-text/art/zh-CN/00449.bin", sDataDir);
+    } else {
+        if (k == 4) { return; }
+        snprintf(path, sizeof(path), "%s/pzs3eu1/00005.bin", sDataDir);
+    }
+    if (!file_there(path)) {
         return;
     }
     sArtBank = k + 1;
@@ -1742,6 +1753,22 @@ static int row_get(int n, int scale, Row *row, int *owned) {
     return 1;
 }
 
+/* Prepare one main-menu row between menu frames, using the normal rasterizer and bounded cache.
+   Font changes clear the cursor with the rows; a new resolution starts it again. With sLock held. */
+static int rows_warm_main(int scale) {
+    if (!sFontChoice) { return 0; }
+    if (sWarmMainScale != scale) { sWarmMainScale = scale; sWarmMainRow = 0; }
+    while (sWarmMainRow < sCount) {
+        int n = sWarmMainRow++;
+        Row row;
+        int owned;
+        if (!sLabels[n].warmMain) { continue; }
+        if (row_get(n, scale, &row, &owned) && owned) { free(row.px); }
+        return 1;
+    }
+    return 0;
+}
+
 /* Puts a drawn row into a picture `stride` pixels wide, its row rectangle's corner at (x, y). */
 static void row_paste(uint8_t *dst, int stride, int x, int y, int rowWidth, int rowHeight, const Row *row) {
     int i, k;
@@ -1923,11 +1950,117 @@ static volatile int sSharedChoice;
 static Face sSharedFont;
 static uint32_t sSharedGeneration;
 
+/* Like the label row cache, keep finished pixels when the renderer needs a texture again. Every source
+   pixel used by a glyph is compared: a different palette or a missing glyph still follows the original path.
+   Callers continue to own their returned buffer; the cache never lends a pointer to the renderer. */
+#define SHARED_ATLAS_MAX 16
+#define SHARED_ATLAS_BYTES (192u * 1024u * 1024u)
+typedef struct SharedAtlas {
+    int slot, plane, choice, scale, width, height, outWidth, outHeight;
+    uint8_t *source, *pixels;
+    size_t bytes;
+    uint64_t used, identity;
+} SharedAtlas;
+static SharedAtlas sSharedAtlases[SHARED_ATLAS_MAX];
+static size_t sSharedAtlasBytes;
+static uint64_t sSharedAtlasClock, sSharedAtlasIdentity;
+
+static void shared_atlas_drop(int n) {
+    SharedAtlas *a = &sSharedAtlases[n];
+    sSharedAtlasBytes -= a->bytes;
+    free(a->source); free(a->pixels);
+    memset(a, 0, sizeof(*a));
+}
+
+/* A font choice changes every sheet; registration or H calibration only changes its own slot. */
+static void shared_atlas_clear(int slot) {
+    int i;
+    for (i = 0; i < SHARED_ATLAS_MAX; i++) {
+        if (sSharedAtlases[i].pixels && (slot < 0 || sSharedAtlases[i].slot == slot)) { shared_atlas_drop(i); }
+    }
+}
+
+/* The rasterizer reads only the original cells of this plane's valid layout entries. Unused texture
+   space may change when the game reuses GS memory for effects; it cannot change any output pixel.
+   Keep the full comparison as the fast path, then compare every byte of every referenced cell. */
+static int shared_atlas_same(const SharedAtlas *a, const uint8_t *rgba) {
+    const SharedSheet *sheet = &sSharedSheets[a->slot];
+    const SharedLayout *layout = &sSharedLayouts[a->slot][a->plane];
+    int i, y;
+    if (memcmp(a->source, rgba, (size_t)a->width * a->height * 4) == 0) { return 1; }
+    if (!layout->rects) { return 0; }
+    for (i = 0; i < sheet->count; i++) {
+        const SharedGlyph *g = &sheet->glyphs[i];
+        int gx, gy, w, h;
+        if (!layout->rects[i].w) { continue; }
+        gx = g->u & 1023; gy = g->v & 1023; w = (g->u >> 10) & 31; h = (g->v >> 10) & 31;
+        for (y = 0; y < h; y++) {
+            size_t at = ((size_t)(gy + y) * a->width + gx) * 4;
+            if (memcmp(a->source + at, rgba + at, (size_t)w * 4) != 0) { return 0; }
+        }
+    }
+    return 1;
+}
+
+static SharedAtlas *shared_atlas_find(int slot, int plane, const uint8_t *rgba, int width, int height, int scale) {
+    int i;
+    for (i = 0; i < SHARED_ATLAS_MAX; i++) {
+        SharedAtlas *a = &sSharedAtlases[i];
+        if (a->pixels && a->slot == slot && a->plane == plane && a->choice == sSharedChoice &&
+            a->scale == scale && a->width == width && a->height == height && shared_atlas_same(a, rgba)) {
+            return a;
+        }
+    }
+    return NULL;
+}
+
+static uint8_t *shared_atlas_get(int slot, int plane, const uint8_t *rgba, int width, int height,
+                                 int scale, int *outWidth, int *outHeight) {
+    SharedAtlas *a = shared_atlas_find(slot, plane, rgba, width, height, scale);
+    if (a) {
+        size_t bytes = (size_t)a->outWidth * a->outHeight * 4;
+        uint8_t *result = malloc(bytes);
+        if (!result) { return NULL; }
+        memcpy(result, a->pixels, bytes);
+        a->used = ++sSharedAtlasClock;
+        *outWidth = a->outWidth; *outHeight = a->outHeight;
+        return result;
+    }
+    return NULL;
+}
+
+static void shared_atlas_keep(int slot, int plane, const uint8_t *rgba, int width, int height,
+                              int scale, const uint8_t *pixels, int outWidth, int outHeight) {
+    size_t sourceBytes = (size_t)width * height * 4, pixelBytes = (size_t)outWidth * outHeight * 4;
+    size_t bytes = sourceBytes + pixelBytes;
+    uint8_t *sourceCopy, *pixelCopy;
+    int i, place;
+    if (bytes > SHARED_ATLAS_BYTES) { return; }
+    for (;;) { /* Same bounded, longest-unused-first policy as row_get. */
+        int oldest = -1;
+        place = -1;
+        for (i = 0; i < SHARED_ATLAS_MAX; i++) {
+            if (!sSharedAtlases[i].pixels) { place = i; }
+            else if (oldest < 0 || sSharedAtlases[i].used < sSharedAtlases[oldest].used) { oldest = i; }
+        }
+        if ((place >= 0 && sSharedAtlasBytes + bytes <= SHARED_ATLAS_BYTES) || oldest < 0) { break; }
+        shared_atlas_drop(oldest);
+    }
+    if (place < 0) { return; }
+    sourceCopy = malloc(sourceBytes); pixelCopy = malloc(pixelBytes);
+    if (!sourceCopy || !pixelCopy) { free(sourceCopy); free(pixelCopy); return; }
+    memcpy(sourceCopy, rgba, sourceBytes); memcpy(pixelCopy, pixels, pixelBytes);
+    sSharedAtlases[place] = (SharedAtlas){slot, plane, sSharedChoice, scale, width, height,
+        outWidth, outHeight, sourceCopy, pixelCopy, bytes, ++sSharedAtlasClock, ++sSharedAtlasIdentity};
+    sSharedAtlasBytes += bytes;
+}
+
 int MenuText_GetSharedFont(void) { return sSharedChoice; }
 
 static void set_shared_font(int choice) {
     if (!font_available(choice, MENU_TEXT_DIALOGUE)) { choice = 0; }
     if (choice == sSharedChoice) { return; }
+    shared_atlas_clear(-1);
     face_close(&sSharedFont);
     sSharedChoice = 0;
     if (choice != 0 && font_open(&sSharedFont, choice)) {
@@ -1955,6 +2088,32 @@ static SharedSheet *shared_sheet(int tbp, int cbp) {
             cbp < sSharedSheets[i].cbp + 4) { return &sSharedSheets[i]; }
     }
     return NULL;
+}
+
+/* A pending H calibration must follow the actual draw's pixels before an atlas can be reused or warmed. */
+static int shared_needs_calibration(const SharedSheet *sheet, int plane) {
+    int i;
+    if (sheet->calibrated) { return 0; }
+    for (i = 0; i < sheet->count; i++) {
+        const SharedGlyph *g = &sheet->glyphs[i];
+        if (g->code == 'H' && ((g->u >> 15) | ((g->v >> 15) << 1)) == plane) { return 1; }
+    }
+    return 0;
+}
+
+/* An identity is assigned only after the normal rasterizer has produced an atlas. No hash-only matches. */
+uint64_t MenuText_GlyphAtlasId(const uint8_t *rgba, int width, int height, int tbp, int cbp, int scale) {
+    uint64_t identity = 0;
+    SharedSheet *sheet;
+    if (!sSharedChoice || !rgba || width < 1 || width > 1024 || height < 1 || height > 1024 || scale < 1 || scale > 4) { return 0; }
+    pthread_mutex_lock(&sLock);
+    sheet = shared_sheet(tbp, cbp);
+    if (sheet && !shared_needs_calibration(sheet, cbp - sheet->cbp)) {
+        SharedAtlas *a = shared_atlas_find((int)(sheet - sSharedSheets), cbp - sheet->cbp, rgba, width, height, scale);
+        if (a) { identity = a->identity; a->used = ++sSharedAtlasClock; }
+    }
+    pthread_mutex_unlock(&sLock);
+    return identity;
 }
 
 /* What of the settings here a decoded texture depends on, for the renderer's texture cache. A new catalog also
@@ -2007,6 +2166,7 @@ void MenuText_RegisterGlyphs(int tbp, int cbp, const void *glyphs, int count, in
         }
     }
     sheet->baseline = sheet->cap; sheet->calibrated = 0;
+    shared_atlas_clear(slot);
     sSharedGeneration++;
     for (i = 0; i < 4; i++) {
         SharedLayout *layout = &sSharedLayouts[slot][i];
@@ -2015,12 +2175,24 @@ void MenuText_RegisterGlyphs(int tbp, int cbp, const void *glyphs, int count, in
     pthread_mutex_unlock(&sLock);
 }
 
+/* The local CJK cells share one em, baseline and advance; latin keeps its original calibration. */
+static void shared_glyph_metrics(const SharedSheet *sheet, const SharedGlyph *g, float *scale, float *baseline) {
+    int glyph, x0, y0, x1, y1, w = (g->u >> 10) & 31, h = (g->v >> 10) & 31;
+    *scale = (float)sheet->cap / sSharedFont.capUnits;
+    *baseline = (float)sheet->baseline;
+    if (g->code < 0x3000 || w != 20 || h != 20) { return; }
+    glyph = face_glyph(&sSharedFont, 0x56FD); /* 国: the selected face's full-height Han reference. */
+    if (glyph && stbtt_GetGlyphBox(&sSharedFont.info, glyph, &x0, &y0, &x1, &y1) && y1 > y0) {
+        *scale = (float)(h - 2) / (y1 - y0);
+        *baseline = 1.0f + y1 * *scale;
+    }
+}
+
 /* Each plane gets its own packed atlas. Padding follows the selected font's actual bounds, so
    descenders and accents fit without changing the cap height or borrowing pixels from the next glyph. */
 static SharedLayout *menu_text_shared_layout(SharedSheet *sheet, int plane, int width, int height) {
     SharedLayout *layout = &sSharedLayouts[sheet - sSharedSheets][plane];
     int i, x = 1, y = 1, rowHeight = 0, bottom = 1;
-    float sy = (float)sheet->cap / sSharedFont.capUnits;
     if (layout->rects && layout->choice == sSharedChoice && layout->cap == sheet->cap &&
         layout->baseline == sheet->baseline && layout->width == width && layout->sourceHeight == height) { return layout; }
     free(layout->rects); memset(layout, 0, sizeof(*layout));
@@ -2031,11 +2203,13 @@ static SharedLayout *menu_text_shared_layout(SharedSheet *sheet, int plane, int 
         SharedRect *r = &layout->rects[i];
         int gx = g->u & 1023, gy = g->v & 1023, w = (g->u >> 10) & 31, h = (g->v >> 10) & 31;
         int x0, y0, x1, y1, glyph;
+        float sy, baseline;
         if (((g->u >> 15) | ((g->v >> 15) << 1)) != plane || !w || !h || gx+w > width || gy+h > height || w + 2 > width) { continue; }
         glyph = face_glyph(&sSharedFont, g->code);
+        shared_glyph_metrics(sheet, g, &sy, &baseline);
         if (glyph && stbtt_GetGlyphBox(&sSharedFont.info, glyph, &x0, &y0, &x1, &y1) && x1 > x0 && y1 > y0) {
-            int top = (int)floorf(sheet->baseline - y1 * sy);
-            int end = (int)ceilf(sheet->baseline - y0 * sy);
+            int top = (int)floorf(baseline - y1 * sy);
+            int end = (int)ceilf(baseline - y0 * sy);
             r->top = top < 0 ? -top : 0; r->bottom = end > h ? end-h : 0;
             if (r->top > 64) { r->top = 64; } /* (a real font needs a few pixels for an accent or a descender) */
             if (r->bottom > 64) { r->bottom = 64; }
@@ -2085,6 +2259,7 @@ static uint8_t *menu_text_glyphs(const uint8_t *rgba, int width, int height, int
             }
             if (bottom >= top) {
                 sheet->cap = bottom - top + 1; sheet->baseline = bottom + 1; sheet->calibrated = 1;
+                shared_atlas_clear((int)(sheet - sSharedSheets));
                 sSharedGeneration++;
             }
             break;
@@ -2092,6 +2267,9 @@ static uint8_t *menu_text_glyphs(const uint8_t *rgba, int width, int height, int
     }
     layout = menu_text_shared_layout(sheet, plane, width, height);
     if (!layout) { return NULL; }
+    result = shared_atlas_get((int)(sheet - sSharedSheets), plane, rgba, width, height,
+                              scale, outWidth, outHeight);
+    if (result) { return result; }
     rw = width * scale; rh = layout->height * scale;
     result = calloc((size_t)rw * rh, 4);
     if (!result) { return NULL; }
@@ -2102,7 +2280,8 @@ static uint8_t *menu_text_glyphs(const uint8_t *rgba, int width, int height, int
         int bx0, by0, bx1, by1, bw, bh, ox, oy, x, y, glyph;
         int left = w, maxAlpha = 0;
         uint8_t ink[3] = {128,128,128};
-        float sy, sx;
+        float sy, sx, baseline, pen = 0;
+        int cjk = g->code >= 0x3000 && w == 20 && h == 20;
         unsigned char *bitmap;
         if (!r->w) { continue; }
         /* Keep the original pixels for missing glyphs, including spaces and symbols. */
@@ -2122,19 +2301,26 @@ static uint8_t *menu_text_glyphs(const uint8_t *rgba, int width, int height, int
             }
         }
         if (!maxAlpha || left == w) { continue; }
-        sy = (float)sheet->cap * scale / sSharedFont.capUnits;
+        shared_glyph_metrics(sheet, g, &sy, &baseline);
+        sy *= scale;
         /* Keep the game's advance width. Only compress a glyph when its ink exceeds its original cell. */
         sx = fminf(sy, (float)((w-left) * scale) / (bx1 - bx0));
+        if (cjk) {
+            int advance, bearing;
+            stbtt_GetGlyphHMetrics(&sSharedFont.info, glyph, &advance, &bearing);
+            sx = sy; /* do not stretch each glyph to the old bitmap's ink bounds */
+            pen = (w * scale - advance * sx) * 0.5f;
+        }
         bitmap = face_bitmap(&sSharedFont, glyph, sx, sy, 0.0f, 0.0f, &bw, &bh, &ox, &oy);
         if (!bitmap) { continue; }
         for (y = 0; y < r->h * scale; y++) {
             memset(result + ((size_t)(r->y * scale + y) * rw + r->x * scale) * 4, 0, (size_t)w * scale * 4);
         }
         for (y = 0; y < bh; y++) {
-            int py = (sheet->baseline + r->top) * scale + oy + y;
+            int py = (int)roundf((baseline + r->top) * scale) + oy + y;
             for (x = 0; x < bw; x++) {
-                int px = left * scale + x;
-                if (px < w * scale && py >= 0 && py < r->h * scale) {
+                int px = cjk ? (int)roundf(pen) + ox + x : left * scale + x;
+                if (px >= 0 && px < w * scale && py >= 0 && py < r->h * scale) {
                     uint8_t *dst = result + ((size_t)(r->y * scale + py) * rw + r->x * scale + px) * 4;
                     memcpy(dst, ink, 3); /* 0x80 is neutral under GS color modulation */
                     dst[3] = (uint8_t)((bitmap[y*bw+x] * (unsigned)maxAlpha + 127) / 255);
@@ -2144,8 +2330,60 @@ static uint8_t *menu_text_glyphs(const uint8_t *rgba, int width, int height, int
         free(bitmap); changed = 1;
     }
     if (!changed) { free(result); return NULL; }
+    shared_atlas_keep((int)(sheet - sSharedSheets), plane, rgba, width, height, scale, result, rw, rh);
     *outWidth = rw; *outHeight = rh;
     return result;
+}
+
+/* One main-menu row or approved source plane per menu frame, using the same rasterizer and caches as real draws.
+   The files contain the original glyph table and RGBA, never a different font or a rendered substitute. */
+void MenuText_WarmGlyphs(int scale) {
+    static int choice, rasterScale;
+    static uint32_t generation, done;
+    int slot, plane;
+    if (!sLabelDir[0] || scale < 1 || scale > 4) { return; }
+    pthread_mutex_lock(&sLock);
+    if (rows_warm_main(scale) || !sSharedChoice) { pthread_mutex_unlock(&sLock); return; }
+    if (choice != sSharedChoice || rasterScale != scale || generation != sSharedGeneration) {
+        choice = sSharedChoice; rasterScale = scale; generation = sSharedGeneration; done = 0;
+    }
+    for (slot = 0; slot < 7; slot++) {
+        SharedSheet *sheet = &sSharedSheets[slot];
+        if (!sheet->count) { continue; }
+        for (plane = 0; plane < 4; plane++) {
+            uint32_t bit = 1u << (slot * 4 + plane), header[8];
+            uint8_t *data, *result;
+            size_t glyphBytes, pixelBytes, bytes;
+            char path[1200];
+            FILE *file;
+            int w, h;
+            if (done & bit) { continue; }
+            done |= bit;
+            if (shared_needs_calibration(sheet, plane)) { continue; }
+            snprintf(path, sizeof(path), "%s/font-warmup/slot-%d-plane-%d.bin", sLabelDir, slot, plane);
+            file = fopen(path, "rb");
+            if (!file) { continue; }
+            if (fread(header, sizeof(header), 1, file) != 1 || header[0] != 0x57335442u || header[1] != 1 ||
+                header[2] < 1 || header[2] > 1024 || header[3] < 1 || header[3] > 1024 ||
+                header[4] != (unsigned)sheet->count || header[5] != (unsigned)slot || header[6] != (unsigned)plane || header[7]) {
+                fclose(file); continue;
+            }
+            glyphBytes = (size_t)sheet->count * sizeof(*sheet->glyphs);
+            pixelBytes = (size_t)header[2] * header[3] * 4;
+            bytes = glyphBytes + pixelBytes;
+            data = malloc(bytes);
+            if (!data) { fclose(file); continue; }
+            if (fread(data, 1, bytes, file) != bytes || fgetc(file) != EOF || memcmp(data, sheet->glyphs, glyphBytes)) {
+                free(data); fclose(file); continue;
+            }
+            fclose(file);
+            result = menu_text_glyphs(data + glyphBytes, (int)header[2], (int)header[3], sheet->tbp,
+                                      sheet->cbp + plane, scale, &w, &h);
+            free(data);
+            if (result) { free(result); pthread_mutex_unlock(&sLock); return; }
+        }
+    }
+    pthread_mutex_unlock(&sLock);
 }
 
 uint8_t *MenuText_RenderGlyphs(const uint8_t *rgba, int width, int height, int tbp, int cbp,

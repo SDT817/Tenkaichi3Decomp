@@ -543,8 +543,9 @@ void PauseMenu_Draw(void) {
            not drawn on the other screen. The result menu (which = 1) is drawn for both as before. */
         extern int Port_NetActive(void);
         extern int Port_NetMe(void);
+        extern int Port_OnlinePauseAllowed(void);
         extern s32 BtlPause_GetMenuPad(void);
-        if (Port_NetActive() && gPauseMenuWhich == 0 && (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) &&
+        if (Port_NetActive() && !Port_OnlinePauseAllowed() && gPauseMenuWhich == 0 && (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) &&
             BtlPause_GetMenuPad() != Port_NetMe()) {
             return;
         }

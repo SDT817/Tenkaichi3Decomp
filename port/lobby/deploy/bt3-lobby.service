@@ -1,0 +1,22 @@
+[Unit]
+Description=BT3 persistent friends lobby (API 1, battle protocol 5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bt3-lobby
+Group=bt3-lobby
+WorkingDirectory=/opt/bt3-lobby
+ExecStart=/usr/bin/python3 -u /opt/bt3-lobby/server.py --config /opt/bt3-lobby/server.json
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bt3-lobby/data
+
+[Install]
+WantedBy=multi-user.target

@@ -364,6 +364,26 @@ s32 BtlAct_GetIdleMotion(BtlActDChr *chr) {
 extern s32 BtlDecide_Common(BtlActDChr *chr, s32 mask); /* forced transitions: stun, flag 0xBE, lost footing, death */
 extern s32 BtlDecide_Main(BtlActDChr *chr, u32 mask);   /* movement, guard, techniques, changes */
 extern s32 BtlDecide_Attack(BtlActDChr *chr, u32 mask);    /* attacks: rush, ki blasts, throws */
+#ifdef PORT
+extern s32 BtlCharApi_GetChara(s32 objId);
+extern s32 BtlSuper_GetId(BtlActDChr *chr, s32 slot);
+
+/* Four decisions delay only DASH actions. Ordinary movement and other inputs keep their original masks.
+   work[19] travels only between neutral and stick movement; 1 means the delay has elapsed. */
+static u32 BtlAct_TrunksFlightMask(BtlActDChr *chr, u32 mask) {
+    if (chr->work[19] > 1) {
+        chr->work[19]--;
+        if (BtlInput_IsHeld(chr, 2)) {
+            mask &= ~0x1E018;
+        }
+    } else if (chr->work[19] == 1) {
+        /* Close movement normally hands off to free movement before it can dash.
+           Let this buffered dash use the same range check as neutral. */
+        mask |= 8;
+    }
+    return mask;
+}
+#endif
 
 /*
  * Action 0xB: the neutral state. Every other action returns here.
@@ -385,6 +405,12 @@ s32 BtlAct_NeutralHandler(BtlActDChr *chr, s32 phase) {
             BtlChar_ClearFlag(chr, 0xE);
         }
         BtlAnim_Play(chr, BtlAct_GetIdleMotion(chr), 0.15f);
+#ifdef PORT
+        /* BeginFrame replaces prev before the next decision, so remember this specific skill exit. */
+        if (BtlAct_GetPrev(chr) == 0x12E && BtlCharApi_GetChara(chr->objId) == 41 && BtlSuper_GetId(chr, 3) == 0x163) {
+            chr->work[19] = 5;
+        }
+#endif
     }
     if (phase == PHASE_RUN) {
         look = 1;
@@ -438,7 +464,11 @@ s32 BtlAct_NeutralHandler(BtlActDChr *chr, s32 phase) {
                 }
             }
         }
+#ifdef PORT
+        BtlDecide_Main(chr, BtlAct_TrunksFlightMask(chr, 0x22FCBFEB));
+#else
         BtlDecide_Main(chr, 0x22FCBFEB);
+#endif
         BtlDecide_Attack(chr, 0x0800054F);
         BtlDecide_Common(chr, 0xF);
         BtlAct_Request(chr, BtlAct_GetQueued(chr));
@@ -565,7 +595,11 @@ s32 BtlAct_MoveHandler(BtlActDChr *chr, s32 phase) {
         if (BtlInput_TestAction(chr, 1, 0)) {
             BtlAct_Request(chr, 0xB);
         }
+#ifdef PORT
+        BtlDecide_Main(chr, BtlAct_TrunksFlightMask(chr, 0x22981FEB));
+#else
         BtlDecide_Main(chr, 0x22981FEB);
+#endif
         BtlDecide_Attack(chr, 0x0800040F);
         BtlDecide_Common(chr, 0xF);
         BtlAct_Request(chr, BtlAct_GetQueued(chr));
@@ -651,7 +685,11 @@ s32 BtlAct_CloseMoveHandler(BtlActDChr *chr, s32 phase) {
         if (BtlInput_TestAction(chr, 2, 1)) {
             BtlAct_Request(chr, 0xB);
         }
+#ifdef PORT
+        BtlDecide_Main(chr, BtlAct_TrunksFlightMask(chr, 0x229CBFE3));
+#else
         BtlDecide_Main(chr, 0x229CBFE3);
+#endif
         BtlDecide_Attack(chr, 0x0800054F);
         BtlDecide_Common(chr, 0xF);
         BtlAct_Request(chr, BtlAct_GetQueued(chr));

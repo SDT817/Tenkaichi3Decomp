@@ -23,6 +23,13 @@ extern f32 gBtlTextAlpha;
 extern u64 *gSaveData; /* local view: only charaBits (+0xC10) is used here */
 
 extern BtlTextWork *BtlMenu_GetWork(void);
+#ifdef PORT
+extern const u16 *UiText_TranslateSpan(const u16 *original);
+#define BTLTEXT_STRING(s) ((u16 *)UiText_TranslateSpan(s))
+#else
+#define BTLTEXT_STRING(s) (s)
+#endif
+
 extern u16 *BtlMenu_GetScript(void);
 extern u16 *BtlMenu_GetScript2(void);
 extern u16 *BtlText_NextLine(u16 *line);        /* start of the next line */
@@ -256,7 +263,7 @@ void BtlText_DrawList(void *pkt, s32 x0, s32 x1, s32 y0, s32 y1, s32 mode) {
                 Font_SetClip(0, 0, 0x1FF, 0x1BF);
                 Font_SetColorRGBA(0xFF, 0xFF, 0xFF, 0x80);
                 Font_SetShadowColorRGBA(0x56, 0x3D, 0x39, 0x80);
-                Font_PrintAt(x0 + 0x1E, y0 - 0x22, p + 2);
+                Font_PrintAt(x0 + 0x1E, y0 - 0x22, BTLTEXT_STRING(p + 2));
                 BtlText_DrawPageIcon(pkt, x0, y0 - 0x28, p[1]);
                 BtlText_PutScissor(pkt, x0, y0, x1, y1);
                 Font_PopStyle();
@@ -273,15 +280,15 @@ void BtlText_DrawList(void *pkt, s32 x0, s32 x1, s32 y0, s32 y1, s32 mode) {
                         Font_SetColorRGBA(BTLTEXT_COL(255.0f), BTLTEXT_COL(255.0f), BTLTEXT_COL(255.0f), 0x80);
                         Font_SetShadowColorRGBA(BTLTEXT_COL(32.0f), BTLTEXT_COL(43.0f), BTLTEXT_COL(94.0f), 0x40);
                     }
-                    fit = Font_FitScale(p + 2, (x1 - x0) - 0x44);
+                    fit = Font_FitScale(BTLTEXT_STRING(p + 2), (x1 - x0) - 0x44);
                     if (fit < 1.0f) {
                         Font_PushStyle();
                         Font_GetScaleXY(&sx, &sy);
                         Font_SetScaleXY(sx * fit, sy);
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 4);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 4));
                         Font_PopStyle();
                     } else {
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 4);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 4));
                     }
                     h = lineH - 2;
                     if (entry == list->cursor[list->page]) {
@@ -315,15 +322,15 @@ void BtlText_DrawList(void *pkt, s32 x0, s32 x1, s32 y0, s32 y1, s32 mode) {
                     }
                     Font_SetColorRGBA(BTLTEXT_COL(170.0f), BTLTEXT_COL(215.0f), BTLTEXT_COL(255.0f), 0x80);
                     Font_SetShadowColorRGBA(BTLTEXT_COL(43.0f), BTLTEXT_COL(54.0f), BTLTEXT_COL(64.0f), 0x40);
-                    fit = Font_FitScale(p + 2, (x1 - x0) - 0x1E);
+                    fit = Font_FitScale(BTLTEXT_STRING(p + 2), (x1 - x0) - 0x1E);
                     if (fit < 1.0f) {
                         Font_PushStyle();
                         Font_GetScaleXY(&sx, &sy);
                         Font_SetScaleXY(sx * fit, sy);
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 2);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 2));
                         Font_PopStyle();
                     } else {
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 2);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 2));
                     }
                     y += 0x1C;
                     break;
@@ -333,15 +340,15 @@ void BtlText_DrawList(void *pkt, s32 x0, s32 x1, s32 y0, s32 y1, s32 mode) {
                     }
                     Font_SetColorRGBA(BTLTEXT_COL(239.0f), BTLTEXT_COL(89.0f), BTLTEXT_COL(89.0f), 0x80);
                     Font_SetShadowColorRGBA(BTLTEXT_COL(64.0f), BTLTEXT_COL(17.0f), BTLTEXT_COL(0.0f), 0x40);
-                    fit = Font_FitScale(p + 2, (x1 - x0) - 0x1E);
+                    fit = Font_FitScale(BTLTEXT_STRING(p + 2), (x1 - x0) - 0x1E);
                     if (fit < 1.0f) {
                         Font_PushStyle();
                         Font_GetScaleXY(&sx, &sy);
                         Font_SetScaleXY(sx * fit, sy);
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 2);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 2));
                         Font_PopStyle();
                     } else {
-                        Font_PrintAt(x0 + 0xF, y + 3, p + 2);
+                        Font_PrintAt(x0 + 0xF, y + 3, BTLTEXT_STRING(p + 2));
                     }
                     y += 0x1C;
                     break;
@@ -520,7 +527,7 @@ void BtlText_DrawEntryName(s32 x, s32 y, s32 n, s32 align, f32 alpha) {
             Font_SetAlign(1);
             break;
         }
-        Font_PrintAt(x, y, str);
+        Font_PrintAt(x, y, BTLTEXT_STRING(str));
         Font_PopStyle();
         Font_Flush(font);
     }
@@ -1329,6 +1336,9 @@ s32 BtlSeqFight_PreUpdate(BtlSeqWaitCtx *ctx) {
 
 /* State 3 update: opens / runs the pause menu, then checks for the end of the battle (-> 4, or 6 without a finish scene). */
 s32 BtlSeqFight_Update(BtlSeqWaitCtx *ctx) {
+#ifdef PORT
+    extern int Port_OnlinePauseAllowed(void);
+#endif
     if (Battle_GetMode() != 8) {
         if (ctx->poll != NULL && !(Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) && ctx->poll()) {
             if (Battle_GetMode() == 7) {
@@ -1342,7 +1352,7 @@ s32 BtlSeqFight_Update(BtlSeqWaitCtx *ctx) {
                    long as they liked): the menu opens for the one who pressed START, the fight, its clock and its
                    sound go on. That player's fighter takes no buttons meanwhile (BtlInput_Sample) and the menu is
                    drawn on that player's screen only (PauseMenu_Draw). */
-                if (Port_NetActive()) {
+                if (Port_NetActive() && !Port_OnlinePauseAllowed()) {
                     Battle_GetWork()->flags |= BATTLE_FLAG_PAUSE_MENU;
                 } else
 #endif
@@ -1355,7 +1365,7 @@ s32 BtlSeqFight_Update(BtlSeqWaitCtx *ctx) {
         }
         if (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) {
 #ifdef PORT
-            if (Port_NetActive()) {
+            if (Port_NetActive() && !Port_OnlinePauseAllowed()) {
                 gPortSeSilent = BtlPause_GetMenuPad() != Port_NetMe(); /* (its sounds are for its owner) */
                 if (PauseMenu_Update(BtlPause_GetMenuPad(), 0) == 0) {
                     Battle_GetWork()->flags &= ~BATTLE_FLAG_PAUSE_MENU;
@@ -1373,7 +1383,7 @@ s32 BtlSeqFight_Update(BtlSeqWaitCtx *ctx) {
 #ifdef PORT
         /* Online the fight can end under an open pause menu (it does not stop for it): the menu is closed, unless
            it is what ended the battle (as in the original, where it stays up through the fade). */
-        if (Port_NetActive() && (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) && !BattleResult_IsAborted()) {
+        if (Port_NetActive() && !Port_OnlinePauseAllowed() && (Battle_GetWork()->flags & BATTLE_FLAG_PAUSE_MENU) && !BattleResult_IsAborted()) {
             PauseMenu_Reset();
             Battle_GetWork()->flags &= ~BATTLE_FLAG_PAUSE_MENU;
         }
