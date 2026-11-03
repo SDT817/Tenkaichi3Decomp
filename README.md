@@ -1,3 +1,9 @@
+# Private edition 0.17 collaboration source
+
+This branch publishes the complete accepted private edition based on official
+v0.1.39.1. Start with [COLLABORATION.md](COLLABORATION.md) for feature branches,
+source verification and build instructions. The original upstream README follows.
+
 # Tenkaichi3Decomp
 
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/RsPFr4pkaN)
@@ -181,3 +187,4 @@ to the game's rights holders.
 This project is not affiliated with or endorsed by the game's developers, publishers or rights holders. It
 exists for preservation, study and interoperability, and distributes none of the game's assets. All rights to
 the game belong to their owners. You need your own legally obtained copy of the game to use it.
+

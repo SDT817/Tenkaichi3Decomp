@@ -1,0 +1,35 @@
+{
+  "formal_parent": "r20-Lobby016",
+  "battle_parent": "r21-Test4",
+  "runtime": [
+    "port/src/gs/gs_gpu.c",
+    "port/src/gs/net_update.c",
+    "port/src/gs/ui.cpp",
+    "port/src/local_release.h",
+    "src/battle/btl_act_d.c",
+    "src/battle/btl_char_action.c"
+  ],
+  "files": [
+    "local/LOBBY017_CHANGES.md",
+    "local/TRUNKS_FLIGHT_CHANGES.md",
+    "local/build_lobby22.py",
+    "local/build_trunks_flight.py",
+    "local/tests/run_trunks_flight.py",
+    "local/tests/test_trunks_flight.c",
+    "port/lobby/integrity_update_probe.c",
+    "port/lobby/present_mode_probe.c",
+    "port/lobby/private_gateway/integrity.go",
+    "port/lobby/private_gateway/integrity_test.go",
+    "port/lobby/private_gateway/main.go",
+    "port/lobby/publish_update.py",
+    "port/lobby/test_integrity_launcher.py",
+    "port/lobby/test_integrity_update.py",
+    "port/lobby/test_update_016_to_017.py",
+    "port/src/gs/gs_gpu.c",
+    "port/src/gs/net_update.c",
+    "port/src/gs/ui.cpp",
+    "port/src/local_release.h",
+    "src/battle/btl_act_d.c",
+    "src/battle/btl_char_action.c"
+  ]
+}

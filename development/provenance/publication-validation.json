@@ -1,0 +1,27 @@
+{
+  "date": "2026-11-03",
+  "private_version": "0.17",
+  "official_version": "0.1.39.1",
+  "official_commit": "7b43a75bd8b0aeabcce0a22c45e1ad66162ac9d7",
+  "official_zip_blobs_matched_against_git_tree": 1042,
+  "recorded_r22_source_files_checked": 1235,
+  "runtime_test_and_build_source_unchanged": true,
+  "localization_maintenance_python_modules_parse": 34,
+  "python_lobby_regression_tests": {
+    "count": 61,
+    "result": "passed",
+    "modules": [
+      "test_lobby2",
+      "test_directory",
+      "test_room_settings",
+      "test_eight_seats",
+      "test_presence",
+      "test_room_versions",
+      "test_pause_room"
+    ]
+  },
+  "go_private_gateway_tests": "go test ./... passed",
+  "publication_secret_and_runtime_artifact_scan": "passed",
+  "new_game_build_or_live_multiplayer_test": false,
+  "note": "Source publication only. Historical game/render/input tests remain in the retained change records; they were not rerun as new gameplay tests for this publication."
+}

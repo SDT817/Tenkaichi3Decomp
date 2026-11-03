@@ -1,0 +1,20 @@
+[
+  {
+    "name": "r20-to-r22-Lobby017.patch",
+    "sha256": "0926c7ab93ca939fdb8e3ea07612ccfb6ae31bcd0ca4f73431628415e603f442",
+    "replay_verified": true,
+    "files": 1235
+  },
+  {
+    "name": "r21-Test4-to-r22-Lobby017.patch",
+    "sha256": "7b741656e16ce9defdb09d47b56a5d056eb758d9a07445100873dbeac948cf22",
+    "replay_verified": true,
+    "files": 1235
+  },
+  {
+    "name": "official1391-to-r22-complete.patch",
+    "sha256": "d28b4c16ae751c26c5f225f30a157a852765c460185e972103b34c740d6b2bac",
+    "replay_verified": true,
+    "files": 1235
+  }
+]

@@ -39,3 +39,27 @@ port/build_release/
 
 # the private key that signs the releases for the automatic update (port/tools/update_key.py generate): never in the repository
 port/tools/update_signing_key.txt
+
+# Private-edition development: credentials and local runtime data
+**/update_signing_key*.txt
+**/bt3_directory_admin.ini
+**/bt3_wii_controls.ini
+**/bt3_online_servers.ini
+**/bt3_server_directory.ini
+**/bt3_private_server.json
+**/bt3_private_server_config.json
+**/private-config/
+**/.env
+**/.env.local
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.db
+*.key
+*.pfx
+*.p12
+/development/local-assets/
+*.exe
+*.dll
+*.zip
+*.7z
